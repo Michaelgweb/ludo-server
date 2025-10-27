@@ -1,14 +1,14 @@
 # Base image
 FROM openjdk:17-jdk-alpine
 
-# Set working directory
+# Set working directory inside container
 WORKDIR /app
 
-# Copy project jar (Maven build artifact)
+# Copy the jar file into container
 COPY target/ludo-server-0.0.1-SNAPSHOT.jar app.jar
 
 # Expose port
 EXPOSE 8080
 
-# Command to run the app
+# Run the jar
 ENTRYPOINT ["java", "-jar", "app.jar"]
