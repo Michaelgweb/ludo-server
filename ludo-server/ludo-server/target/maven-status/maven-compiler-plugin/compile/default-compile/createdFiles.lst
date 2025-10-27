@@ -1,0 +1,14 @@
+com\yourcompany\ludo\security\SecurityConfig.class
+com\yourcompany\ludo\dto\UserDto.class
+com\yourcompany\ludo\controller\UserController.class
+com\yourcompany\ludo\dto\RegisterRequest.class
+com\yourcompany\ludo\service\UserService.class
+com\yourcompany\ludo\repository\UserRepository.class
+com\yourcompany\ludo\util\JwtFilter.class
+com\yourcompany\ludo\config\SwaggerConfig.class
+com\yourcompany\ludo\controller\AuthController.class
+com\yourcompany\ludo\model\User.class
+com\yourcompany\ludo\LudoServerApplication.class
+com\yourcompany\ludo\util\JwtUtil.class
+com\yourcompany\ludo\service\UserServiceImpl.class
+com\yourcompany\ludo\dto\LoginRequest.class

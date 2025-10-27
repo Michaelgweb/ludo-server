@@ -1,0 +1,19 @@
+package com.yourcompany.ludo.service.impl;
+
+import com.yourcompany.ludo.dto.WithdrawRequestDto;
+import com.yourcompany.ludo.service.NotificationService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+@Service
+public class NotificationServiceImpl implements NotificationService {
+
+    private static final Logger logger = LoggerFactory.getLogger(NotificationServiceImpl.class);
+
+    @Override
+    public void sendWebSocketNotification(Long userId, String topic, WithdrawRequestDto dto) {
+        // TODO: বাস্তব WebSocket notification logic এখানে যোগ করুন
+        logger.info("[Notification] Sending WebSocket to user {} on topic {} with data {}", userId, topic, dto);
+    }
+}
