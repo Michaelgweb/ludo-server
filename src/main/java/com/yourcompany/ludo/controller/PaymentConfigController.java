@@ -1,16 +1,19 @@
-// ==================== PaymentConfigController.java ====================
 package com.yourcompany.ludo.controller;
 
 import com.yourcompany.ludo.model.PaymentConfig;
 import com.yourcompany.ludo.model.User;
 import com.yourcompany.ludo.service.PaymentConfigService;
 import com.yourcompany.ludo.service.UserService;
+
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
-import java.util.Optional;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/payment-config")
@@ -22,72 +25,112 @@ public class PaymentConfigController {
     @Autowired
     private UserService userService;
 
-    // ===== Helper method for ADMIN validation =====
-    private ResponseEntity<String> validateAdmin(String gameId) {
-        Optional<User> userOpt = userService.findByGameId(gameId);
-        if (userOpt.isEmpty()) return ResponseEntity.status(403).body("❌ Invalid gameId");
+    // =====================================
+    // ADMIN CHECK FROM JWT
+    // =====================================
+    private User getAdmin(Authentication authentication) {
+        if (authentication == null) {
+            throw new RuntimeException("Unauthorized");
+        }
 
-        User user = userOpt.get();
-        if (user.getRole() != User.Role.ADMIN) return ResponseEntity.status(403).body("❌ Only ADMIN allowed");
-        return null; // means OK
+        User user = userService
+                .findByGameId(authentication.getName())
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        if (user.getRole() != User.Role.ADMIN) {
+            throw new RuntimeException("Only ADMIN allowed");
+        }
+
+        return user;
     }
 
-    /** Public API: Get all configs */
+    // =====================================
+    // PUBLIC - GET ALL PAYMENT CONFIG
+    // =====================================
     @GetMapping
     public ResponseEntity<List<PaymentConfig>> getAllConfigs() {
         return ResponseEntity.ok(service.getAllConfigs());
     }
 
-    /** Public API: Get config by method */
+    // =====================================
+    // PUBLIC - GET BY METHOD
+    // =====================================
     @GetMapping("/{method}")
     public ResponseEntity<?> getConfig(@PathVariable String method) {
         return service.getConfig(method)
                 .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+                .orElseGet(() -> {
+                    Map<String, String> error = new HashMap<>();
+                    error.put("error", "Payment method not found");
+                    return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+                });
     }
 
-    /** Create or Update config (ADMIN only) */
-    @PostMapping("/update-by-gameid")
-    public ResponseEntity<?> updateConfigByGameId(
-            @RequestParam String gameId,
+    // =====================================
+    // CREATE OR UPDATE PAYMENT CONFIG
+    // ADMIN ONLY
+    // =====================================
+    @PostMapping("/update")
+    public ResponseEntity<?> updateConfig(
             @RequestParam String method,
-            @RequestParam String number
-    ) {
-        ResponseEntity<String> validation = validateAdmin(gameId);
-        if (validation != null) return validation;
-
-        PaymentConfig updated = service.saveOrUpdate(method, number);
-        return ResponseEntity.ok(updated);
-    }
-
-    /** Update only number (ADMIN only) */
-    @PatchMapping("/update-number")
-    public ResponseEntity<?> updateNumberByGameId(
-            @RequestParam String gameId,
-            @RequestParam String method,
-            @RequestParam String number
-    ) {
-        ResponseEntity<String> validation = validateAdmin(gameId);
-        if (validation != null) return validation;
-
+            @RequestParam String number,
+            Authentication authentication) {
         try {
-            PaymentConfig updated = service.updateNumber(method, number);
+            getAdmin(authentication);
+
+            PaymentConfig updated = service.saveOrUpdate(method, number);
             return ResponseEntity.ok(updated);
-        } catch (RuntimeException e) {
-            return ResponseEntity.status(404).body(e.getMessage());
+
+        } catch (Exception e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(error);
         }
     }
 
-    /** Delete config (ADMIN only) */
+    // =====================================
+    // UPDATE ONLY NUMBER
+    // ADMIN ONLY
+    // =====================================
+    @PatchMapping("/update-number")
+    public ResponseEntity<?> updateNumber(
+            @RequestParam String method,
+            @RequestParam String number,
+            Authentication authentication) {
+        try {
+            getAdmin(authentication);
+
+            PaymentConfig updated = service.updateNumber(method, number);
+            return ResponseEntity.ok(updated);
+
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+        }
+    }
+
+    // =====================================
+    // DELETE PAYMENT CONFIG
+    // ADMIN ONLY
+    // =====================================
     @DeleteMapping("/{method}")
     public ResponseEntity<?> deleteConfig(
             @PathVariable String method,
-            @RequestParam String gameId
-    ) {
-        ResponseEntity<String> validation = validateAdmin(gameId);
-        if (validation != null) return validation;
+            Authentication authentication) {
+        try {
+            getAdmin(authentication);
 
-        service.deleteConfig(method);
-        return ResponseEntity.ok("✅ Payment method deleted");
+            service.deleteConfig(method);
+
+            Map<String, String> success = new HashMap<>();
+            success.put("message", "Payment method deleted successfully");
+            return ResponseEntity.ok(success);
+
+        } catch (Exception e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(error);
+        }
     }
 }
