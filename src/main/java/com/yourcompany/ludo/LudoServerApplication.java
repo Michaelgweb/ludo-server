@@ -42,8 +42,9 @@ public class LudoServerApplication {
     @Transactional
     CommandLineRunner createAdmin(UserRepository userRepository, PasswordEncoder encoder) {
         return args -> {
-            String adminMobile = "01887869824";
-            String adminPassword = "87869824";
+            // Environment variable থেকে পড়ুন; না থাকলে আগের ডিফল্ট ব্যবহার হবে
+            String adminMobile = System.getenv().getOrDefault("ADMIN_MOBILE", "01887869824");
+            String adminPassword = System.getenv().getOrDefault("ADMIN_PASSWORD", "87869824");
 
             // Check if admin already exists by mobile
             Optional<User> optionalAdmin = userRepository.findByMobile(adminMobile);
@@ -53,7 +54,11 @@ public class LudoServerApplication {
                 User admin = new User();
                 admin.setMobile(adminMobile);
                 admin.setPassword(encoder.encode(adminPassword));
-                admin.setBalance(BigDecimal.ZERO);
+
+                // ✅ FIX: setBalance() নেই। balance = depositBalance + withdrawBalance
+                admin.setDepositBalance(BigDecimal.ZERO);
+                admin.setWithdrawBalance(BigDecimal.ZERO);
+
                 admin.setRole(User.Role.ADMIN);
                 admin.setGameId(generateUniqueGameId(userRepository));
 
@@ -61,7 +66,8 @@ public class LudoServerApplication {
                 admin.setReferralCode(UUID.randomUUID().toString().replace("-", "").substring(0, 6));
 
                 userRepository.save(admin);
-                System.out.println("✅ Admin user created: " + adminMobile + " / " + adminPassword);
+                // পাসওয়ার্ড আর লগ করা হচ্ছে না
+                System.out.println("✅ Admin user created: " + adminMobile);
             } else {
                 // Update existing admin if missing data
                 User admin = optionalAdmin.get();
