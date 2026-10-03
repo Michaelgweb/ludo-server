@@ -1,37 +1,27 @@
 package com.yourcompany.ludo.controller;
 
 import com.yourcompany.ludo.service.DepositService;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.server.ResponseStatusException;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.Map;
 
-/** মোবাইলের SMS-forwarder এই endpoint-এ POST করবে */
+/** মোবাইলের SMS-forwarder admin token দিয়ে এই endpoint-এ POST করবে */
 @RestController
 @RequestMapping("/api/payment-sms")
+@PreAuthorize("hasRole('ADMIN')")
 public class PaymentSmsController {
 
     public record IncomingSms(String sender, String message) {}
 
     private final DepositService depositService;
 
-    @Value("${app.sms.secret}")
-    private String secret;
-
     public PaymentSmsController(DepositService depositService) {
         this.depositService = depositService;
     }
 
     @PostMapping("/incoming")
-    public Map<String, Object> incoming(@RequestHeader("X-Device-Key") String key,
-                                        @RequestBody IncomingSms body) {
-        boolean ok = MessageDigest.isEqual(
-                secret.getBytes(StandardCharsets.UTF_8), key.getBytes(StandardCharsets.UTF_8));
-        if (!ok) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid device key");
+    public Map<String, Object> incoming(@RequestBody IncomingSms body) {
         return Map.of("result", depositService.ingestSms(body.sender(), body.message()).name());
     }
 }
