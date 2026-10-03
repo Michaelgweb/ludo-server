@@ -84,10 +84,10 @@ public class AuthController {
 
         String token = jwtUtil.generateToken(newUser.getGameId(), newUser.getRole().name());
 
+        // পাসওয়ার্ড বিল্ডারে দেওয়া হয়নি, তাই রেসপন্সে যাবে না
         UserDto responseUser = new UserDto.Builder()
                 .id(newUser.getId())
                 .mobile(newUser.getMobile())
-                .password(null) // never return password
                 .gameId(newUser.getGameId())
                 .balance(newUser.getBalance())
                 .role(newUser.getRole().name())
