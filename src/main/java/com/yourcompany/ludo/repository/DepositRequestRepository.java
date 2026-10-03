@@ -1,23 +1,37 @@
 package com.yourcompany.ludo.repository;
 
 import com.yourcompany.ludo.model.DepositRequest;
+import com.yourcompany.ludo.model.DepositRequest.Status;
 import com.yourcompany.ludo.model.User;
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.stereotype.Repository;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
 
-@Repository
 public interface DepositRequestRepository extends JpaRepository<DepositRequest, Long> {
 
-    // User এর deposits
-    List<DepositRequest> findByUser(User user);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select d from DepositRequest d where d.id = :id")
+    Optional<DepositRequest> findByIdForUpdate(@Param("id") Long id);
 
-    // Status অনুযায়ী deposits
-    List<DepositRequest> findByStatus(DepositRequest.Status status);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<DepositRequest> findFirstByMethodAndUserTransactionIdAndStatus(
+            String method, String userTransactionId, Status status);
 
-    // Transaction ID check
-    Optional<DepositRequest> findByTransactionId(String transactionId);
     boolean existsByTransactionId(String transactionId);
+
+    boolean existsByMethodAndUserTransactionId(String method, String userTransactionId);
+
+    List<DepositRequest> findByUserOrderByIdDesc(User user);
+
+    @EntityGraph(attributePaths = "user")
+    Page<DepositRequest> findByStatus(Status status, Pageable pageable);
+
+    @Override
+    @EntityGraph(attributePaths = "user")
+    Page<DepositRequest> findAll(Pageable pageable);
 }
