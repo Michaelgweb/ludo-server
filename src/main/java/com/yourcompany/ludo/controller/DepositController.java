@@ -1,157 +1,110 @@
 package com.yourcompany.ludo.controller;
 
 import com.yourcompany.ludo.dto.DepositRequestDto;
-import com.yourcompany.ludo.dto.NotificationDto;
 import com.yourcompany.ludo.model.DepositRequest;
-import com.yourcompany.ludo.model.PaymentConfig;
 import com.yourcompany.ludo.model.User;
 import com.yourcompany.ludo.service.DepositService;
-import com.yourcompany.ludo.service.PaymentConfigService;
+import com.yourcompany.ludo.service.PaymentRotationService;
 import com.yourcompany.ludo.service.UserService;
-import com.yourcompany.ludo.service.NotificationService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.ResponseEntity;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.data.domain.Page;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
-import java.time.LocalDateTime;
+import java.math.BigDecimal;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/deposit")
 public class DepositController {
 
-    @Autowired
-    private DepositService depositService;
+    public record PrepareRequest(String method, BigDecimal amount) {}
+    public record SubmitRequest(String userTransactionId) {}
+    public record NoteRequest(String note) {}
+    public record ReasonRequest(String reason) {}
 
-    @Autowired
-    private UserService userService;
+    private final DepositService depositService;
+    private final UserService userService;
+    private final PaymentRotationService rotation;
 
-    @Autowired
-    private PaymentConfigService paymentConfigService;
-
-    @Autowired
-    private NotificationService notificationService;
-
-    @Autowired
-    private SimpMessagingTemplate messagingTemplate;
-
-    // ================= Create Deposit Request =================
-    @PostMapping("/request")
-    public ResponseEntity<?> createDepositRequest(@RequestBody DepositRequest depositRequest, Authentication authentication) {
-        try {
-            String gameId = authentication.getName();
-            User user = userService.findByGameId(gameId).orElse(null);
-            if (user == null) return ResponseEntity.status(401).body("Unauthorized");
-
-            PaymentConfig config = paymentConfigService.getConfig(depositRequest.getMethod()).orElse(null);
-            if (config == null) return ResponseEntity.badRequest().body(Map.of("error", "Payment method not available"));
-
-            depositRequest.setUser(user);
-            DepositRequest savedRequest = depositService.createDepositRequest(depositRequest);
-
-            return ResponseEntity.ok(Map.of(
-                    "deposit", DepositRequestDto.fromEntity(savedRequest),
-                    "paymentNumber", config.getNumber()
-            ));
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        }
+    public DepositController(DepositService depositService, UserService userService,
+                             PaymentRotationService rotation) {
+        this.depositService = depositService;
+        this.userService = userService;
+        this.rotation = rotation;
     }
 
-    // ================= Pending Deposits =================
-    @GetMapping("/pending")
-    public ResponseEntity<List<DepositRequestDto>> getPendingDeposits() {
-        List<DepositRequest> pendingRequests = depositService.getPendingDeposits();
-        return ResponseEntity.ok(
-                pendingRequests.stream()
-                        .map(DepositRequestDto::fromEntity)
-                        .collect(Collectors.toList())
-        );
+    private User currentUser(Authentication auth) {
+        return userService.findByGameId(auth.getName())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Unauthorized"));
     }
 
-    // ================= My Deposit History =================
+    // ---------------- ইউজার ----------------
+
+    /** কোন কোন মেথডে এখন active নম্বর আছে */
+    @GetMapping("/options")
+    public List<String> options() {
+        return rotation.listAll().stream()
+                .filter(PaymentRotationService.AccountDto::active)
+                .map(PaymentRotationService.AccountDto::method)
+                .distinct().toList();
+    }
+
+    @PostMapping("/prepare")
+    public Map<String, Object> prepare(@RequestBody PrepareRequest req, Authentication auth) {
+        DepositRequest d = depositService.prepare(currentUser(auth), req.method(), req.amount());
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("depositId", d.getId());
+        res.put("transactionId", d.getTransactionId());
+        res.put("method", d.getMethod());
+        res.put("amount", d.getAmount());
+        res.put("paymentNumber", d.getPaymentAccountNumber());
+        res.put("status", d.getStatus().name());
+        return res;
+    }
+
+    @PostMapping("/{id}/submit")
+    public DepositRequestDto submit(@PathVariable Long id, @RequestBody SubmitRequest req, Authentication auth) {
+        return DepositRequestDto.fromEntity(depositService.submit(currentUser(auth), id, req.userTransactionId()));
+    }
+
+    @PostMapping("/{id}/cancel")
+    public DepositRequestDto cancel(@PathVariable Long id, Authentication auth) {
+        return DepositRequestDto.fromEntity(depositService.cancel(id, currentUser(auth)));
+    }
+
     @GetMapping("/my-history")
-    public ResponseEntity<List<DepositRequestDto>> getMyDepositHistory(Authentication authentication) {
-        String gameId = authentication.getName();
-        User user = userService.findByGameId(gameId).orElse(null);
-        if (user == null) return ResponseEntity.status(401).build();
-
-        List<DepositRequest> userDeposits = depositService.getDepositsByUser(user);
-        return ResponseEntity.ok(
-                userDeposits.stream()
-                        .map(DepositRequestDto::fromEntity)
-                        .collect(Collectors.toList())
-        );
+    public List<DepositRequestDto> myHistory(Authentication auth) {
+        return depositService.myDeposits(currentUser(auth)).stream().map(DepositRequestDto::fromEntity).toList();
     }
 
-    // ================= All Deposit History =================
-    @GetMapping("/all-history")
-    public ResponseEntity<List<DepositRequestDto>> getAllDepositHistory() {
-        List<DepositRequest> allDeposits = depositService.getAllDeposits();
-        return ResponseEntity.ok(
-                allDeposits.stream()
-                        .map(DepositRequestDto::fromEntity)
-                        .collect(Collectors.toList())
-        );
+    // ---------------- অ্যাডমিন + সাপোর্ট(STAFF) ----------------
+
+    @GetMapping("/admin")
+    @PreAuthorize("hasAnyRole('ADMIN','STAFF')")
+    public Page<DepositRequestDto> adminList(@RequestParam(required = false) DepositRequest.Status status,
+                                             @RequestParam(defaultValue = "0") int page,
+                                             @RequestParam(defaultValue = "50") int size) {
+        return depositService.list(status, page, size).map(DepositRequestDto::fromEntity);
     }
 
-    // ================= Approve Deposit =================
-    @PostMapping("/approve/{id}")
-    public ResponseEntity<?> approveDeposit(@PathVariable Long id) {
-        try {
-            DepositRequest approved = depositService.approveDeposit(id);
-
-            // WebSocket notification to user
-            sendUserNotification(approved.getUser(),
-                    "Your deposit request of " + approved.getAmount() + " has been approved!");
-
-            return ResponseEntity.ok(DepositRequestDto.fromEntity(approved));
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        }
+    @PostMapping("/admin/{id}/approve")
+    @PreAuthorize("hasAnyRole('ADMIN','STAFF')")
+    public DepositRequestDto adminApprove(@PathVariable Long id,
+                                          @RequestBody(required = false) NoteRequest req, Authentication auth) {
+        return DepositRequestDto.fromEntity(
+                depositService.approve(id, currentUser(auth), req == null ? null : req.note()));
     }
 
-    // ================= Reject Deposit =================
-    @PostMapping("/reject/{id}")
-    public ResponseEntity<?> rejectDeposit(@PathVariable Long id) {
-        try {
-            DepositRequest rejected = depositService.rejectDeposit(id);
-
-            // WebSocket notification to user
-            sendUserNotification(rejected.getUser(),
-                    "Your deposit request of " + rejected.getAmount() + " has been rejected!");
-
-            return ResponseEntity.ok(DepositRequestDto.fromEntity(rejected));
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    // ================= Update Payment Config =================
-    @PostMapping("/payment-config")
-    public ResponseEntity<?> updatePaymentConfig(@RequestParam String method, @RequestParam String number) {
-        PaymentConfig updated = paymentConfigService.saveOrUpdate(method, number);
-        return ResponseEntity.ok(updated);
-    }
-
-    // ================= Get All Payment Configs =================
-    @GetMapping("/payment-config")
-    public ResponseEntity<?> getPaymentConfigs() {
-        return ResponseEntity.ok(paymentConfigService.getAllConfigs());
-    }
-
-    // ================= WebSocket Notification Helper =================
-    private void sendUserNotification(User user, String message) {
-        if (user == null) return;
-        NotificationDto notification = new NotificationDto(
-                "Deposit Update",
-                message,
-                LocalDateTime.now().toString()
-        );
-        messagingTemplate.convertAndSend("/topic/notifications/" + user.getGameId(), notification);
+    @PostMapping("/admin/{id}/reject")
+    @PreAuthorize("hasAnyRole('ADMIN','STAFF')")
+    public DepositRequestDto adminReject(@PathVariable Long id,
+                                         @RequestBody(required = false) ReasonRequest req, Authentication auth) {
+        return DepositRequestDto.fromEntity(
+                depositService.reject(id, currentUser(auth), req == null ? null : req.reason()));
     }
 }
