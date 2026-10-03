@@ -61,7 +61,6 @@ public class SecurityConfig {
     }
 
     // Spring Boot যেন ফিল্টার দুটো আলাদাভাবে সার্ভলেট চেইনে না বসায়
-    // (এগুলো শুধু Security Filter Chain-এর ভেতরে চলবে)
     @Bean
     public FilterRegistrationBean<JwtFilter> jwtFilterRegistration(JwtFilter filter) {
         FilterRegistrationBean<JwtFilter> reg = new FilterRegistrationBean<>(filter);
@@ -99,16 +98,21 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
-                // Admin Endpoints (public তালিকার আগে রাখা হয়েছে, নইলে /api/payment-config/** আগেই permitAll হয়ে যায়)
+                // ===== Admin only (public তালিকার আগে থাকতে হবে) =====
                 .requestMatchers(
                     "/api/payment-config/admin/**",
+                    "/api/admin/payment-accounts/**",
+                    "/api/payment-sms/**",
                     "/api/withdraw/approve/**",
                     "/api/withdraw/reject/**",
                     "/api/withdraw/pending/**",
                     "/api/withdraw/complete/**"
                 ).hasRole("ADMIN")
 
-                // Public Endpoints
+                // ===== Admin + Support (STAFF) : ডিপোজিট ম্যানেজমেন্ট =====
+                .requestMatchers("/api/deposit/admin/**").hasAnyRole("ADMIN", "STAFF")
+
+                // ===== Public Endpoints =====
                 .requestMatchers(
                     "/",
                     "/error",
@@ -126,10 +130,11 @@ public class SecurityConfig {
                     "/ludo-ws/**"
                 ).permitAll()
 
-                // Authenticated Endpoints
+                // ===== Authenticated =====
                 .requestMatchers("/api/user/profile/**").authenticated()
+                .requestMatchers("/api/deposit/**").authenticated()
 
-                // All others need authentication
+                // বাকি সব লগইন লাগবে
                 .anyRequest().authenticated()
             )
             // --- Stateless Session ---
