@@ -42,6 +42,9 @@ public class DepositService {
     private static final BigDecimal MAX = new BigDecimal("500000.00");
     private static final SecureRandom RND = new SecureRandom();
 
+    /** একজন ইউজারের একসাথে সর্বোচ্চ কতটা TrxID-ছাড়া pending ডিপোজিট থাকতে পারবে */
+    private static final long MAX_OPEN_UNSUBMITTED = 3;
+
     /** submit আর SMS একসাথে এলে race এড়াতে (একটি সার্ভার ইনস্ট্যান্সের জন্য) */
     private static final Object MATCH_LOCK = new Object();
 
@@ -49,6 +52,7 @@ public class DepositService {
     private final PaymentSmsRepository smsRepo;
     private final PaymentRotationService rotation;
     private final SimpMessagingTemplate ws;
+    private final UserService userService;
     private final TransactionTemplate tx;
 
     @PersistenceContext
@@ -56,11 +60,12 @@ public class DepositService {
 
     public DepositService(DepositRequestRepository repo, PaymentSmsRepository smsRepo,
                           PaymentRotationService rotation, SimpMessagingTemplate ws,
-                          PlatformTransactionManager tm) {
+                          PlatformTransactionManager tm, UserService userService) {
         this.repo = repo;
         this.smsRepo = smsRepo;
         this.rotation = rotation;
         this.ws = ws;
+        this.userService = userService;
         this.tx = new TransactionTemplate(tm);
     }
 
@@ -70,6 +75,19 @@ public class DepositService {
         if (user.isBlocked()) throw err(HttpStatus.FORBIDDEN, "আপনার অ্যাকাউন্ট ব্লকড");
         amount = validateAmount(amount);
         String m = PaymentRules.normalizeMethod(method);
+
+        // স্প্যাম ঠেকাতে: TrxID না দেওয়া অসমাপ্ত ডিপোজিট সীমিত
+        Long open = em.createQuery(
+                        "select count(d) from DepositRequest d "
+                                + "where d.user.id = :uid and d.status = :st and d.userTransactionId is null",
+                        Long.class)
+                .setParameter("uid", user.getId())
+                .setParameter("st", Status.PENDING)
+                .getSingleResult();
+        if (open >= MAX_OPEN_UNSUBMITTED) {
+            throw err(HttpStatus.TOO_MANY_REQUESTS,
+                    "আগের ডিপোজিট সম্পন্ন করুন বা বাতিল করুন, তারপর নতুন করুন");
+        }
 
         PaymentRotationService.AccountDto acc = rotation.assignNext(m);
 
@@ -211,7 +229,6 @@ public class DepositService {
     private void approveInternal(DepositRequest d, Long adminId, boolean auto) {
         User u = em.find(User.class, d.getUser().getId(), LockModeType.PESSIMISTIC_WRITE);
         u.addToDepositBalance(d.getAmount());
-        // TODO: first-deposit / referral bonus এখানে দিন (u.isFirstDepositBonusGiven() ইত্যাদি)
 
         d.setStatus(Status.APPROVED);
         d.setAutoApproved(auto);
@@ -219,16 +236,23 @@ public class DepositService {
         d.setProcessedAt(LocalDateTime.now());
         repo.save(d);
 
+        onDepositApproved(u, d);
+
         notifyAfterCommit(u.getGameId(), "আপনার " + d.getAmount() + " টাকার ডিপোজিট অ্যাপ্রুভ হয়েছে!");
+        // কমিট হওয়ার পর ওয়ালেটের নতুন ব্যালেন্স রিয়েলটাইমে পাঠানো
+        refreshProfileAfterCommit(u.getGameId());
     }
 
-    private void notifyAfterCommit(String gameId, String msg) {
-        Runnable r = () -> {
-            try {
-                ws.convertAndSend("/topic/notifications/" + gameId,
-                        new NotificationDto("Deposit Update", msg, LocalDateTime.now().toString()));
-            } catch (Exception ignored) { /* নোটিফিকেশন ফেল হলেও ডিপোজিট নষ্ট হবে না */ }
-        };
+    /**
+     * TODO: ডিপোজিট অ্যাপ্রুভ হলে যা যা হবে সেই বোনাস লজিক এখানে বসবে
+     * (first-deposit বোনাস, রেফারারের PENDING বোনাস COMPLETED করা ইত্যাদি)।
+     * এই মেথড approveInternal-এর transaction-এর ভেতরেই চলে।
+     */
+    private void onDepositApproved(User user, DepositRequest deposit) {
+        // এখনো কোনো বোনাস নেই
+    }
+
+    private void afterCommit(Runnable r) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override public void afterCommit() { r.run(); }
@@ -236,6 +260,23 @@ public class DepositService {
         } else {
             r.run();
         }
+    }
+
+    private void notifyAfterCommit(String gameId, String msg) {
+        afterCommit(() -> {
+            try {
+                ws.convertAndSend("/topic/notifications/" + gameId,
+                        new NotificationDto("Deposit Update", msg, LocalDateTime.now().toString()));
+            } catch (Exception ignored) { /* নোটিফিকেশন ফেল হলেও ডিপোজিট নষ্ট হবে না */ }
+        });
+    }
+
+    private void refreshProfileAfterCommit(String gameId) {
+        afterCommit(() -> {
+            try {
+                userService.notifyUserUpdate(gameId);
+            } catch (Exception ignored) { /* রিয়েলটাইম ফেল হলেও ডিপোজিট নষ্ট হবে না */ }
+        });
     }
 
     private static BigDecimal validateAmount(BigDecimal a) {
