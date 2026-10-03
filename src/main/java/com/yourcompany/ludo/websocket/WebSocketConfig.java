@@ -1,6 +1,6 @@
 package com.yourcompany.ludo.websocket;
 
-import org.springframework.context.annotation.Bean;
+import jakarta.annotation.PreDestroy;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
@@ -14,18 +14,19 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final JwtHandshakeInterceptor jwtHandshakeInterceptor;
 
+    /**
+     * সার্ভার-সাইড হার্টবিটের জন্য আলাদা scheduler। ইচ্ছা করে @Bean করিনি,
+     * নইলে আপনার @Scheduled cleanup task-ও এই pool ব্যবহার করত।
+     */
+    private final ThreadPoolTaskScheduler heartbeatScheduler;
+
     public WebSocketConfig(JwtHandshakeInterceptor jwtHandshakeInterceptor) {
         this.jwtHandshakeInterceptor = jwtHandshakeInterceptor;
-    }
-
-    /** সার্ভার-সাইড হার্টবিটের জন্য দরকার */
-    @Bean
-    public ThreadPoolTaskScheduler wsHeartbeatScheduler() {
-        ThreadPoolTaskScheduler ts = new ThreadPoolTaskScheduler();
-        ts.setPoolSize(2);
-        ts.setThreadNamePrefix("ws-heartbeat-");
-        ts.initialize();
-        return ts;
+        this.heartbeatScheduler = new ThreadPoolTaskScheduler();
+        this.heartbeatScheduler.setPoolSize(2);
+        this.heartbeatScheduler.setThreadNamePrefix("ws-heartbeat-");
+        this.heartbeatScheduler.setDaemon(true);
+        this.heartbeatScheduler.initialize();
     }
 
     @Override
@@ -41,6 +42,11 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         registry.setApplicationDestinationPrefixes("/app");
         registry.enableSimpleBroker("/topic")
                 .setHeartbeatValue(new long[]{10000, 10000})
-                .setTaskScheduler(wsHeartbeatScheduler());
+                .setTaskScheduler(heartbeatScheduler);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        heartbeatScheduler.shutdown();
     }
 }
