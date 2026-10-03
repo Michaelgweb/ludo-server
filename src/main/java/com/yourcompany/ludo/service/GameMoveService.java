@@ -7,7 +7,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * টোকেন চাল যাচাই, কাটা ও জেতা ধরা। ক্লায়েন্ট শুধু টোকেন নম্বর (০-৩) পাঠায়,
@@ -85,5 +87,29 @@ public class GameMoveService {
                 won ? gameId : null, s.getCurrentPlayer(),
                 new ArrayList<>(s.getPlayer1Tokens()), new ArrayList<>(s.getPlayer2Tokens()));
     }
-}
 
+    /**
+     * রিকানেক্ট / অ্যাপ রিস্টার্টের পর ক্লায়েন্টের অবস্থা সিঙ্ক করার জন্য।
+     * শুধু ওই ম্যাচের খেলোয়াড় দেখতে পাবে (slotOf অন্য কেউ হলে IllegalArgumentException)।
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> state(Long sid, String gameId) {
+        GameSession s = sessions.findById(sid)
+                .orElseThrow(() -> new IllegalArgumentException("Session not found"));
+        int me = s.slotOf(gameId);
+
+        Map<String, Object> m = new HashMap<>();
+        m.put("sessionId", s.getId());
+        m.put("status", s.getStatus());
+        m.put("mySlot", me);
+        m.put("currentPlayer", s.getCurrentPlayer());
+        m.put("pendingMove", s.isPendingMove());
+        m.put("diceOwner", s.getDiceOwner());
+        m.put("lastDiceValue", s.getLastDiceValue());
+        m.put("player1Tokens", new ArrayList<>(s.getPlayer1Tokens()));
+        m.put("player2Tokens", new ArrayList<>(s.getPlayer2Tokens()));
+        m.put("winnerGameId", s.getWinner() != null ? s.getWinner().getGameId() : null);
+        m.put("serverTime", System.currentTimeMillis());
+        return m;
+    }
+}
