@@ -1,166 +1,260 @@
 package com.yourcompany.ludo.service;
 
-import com.yourcompany.ludo.model.BonusHistory;
+import com.yourcompany.ludo.dto.NotificationDto;
 import com.yourcompany.ludo.model.DepositRequest;
+import com.yourcompany.ludo.model.DepositRequest.Status;
+import com.yourcompany.ludo.model.PaymentSms;
 import com.yourcompany.ludo.model.User;
-import com.yourcompany.ludo.repository.BonusHistoryRepository;
 import com.yourcompany.ludo.repository.DepositRequestRepository;
-import com.yourcompany.ludo.repository.UserRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
+import com.yourcompany.ludo.repository.PaymentSmsRepository;
+import com.yourcompany.ludo.util.PaymentRules;
+import com.yourcompany.ludo.util.SmsParser;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
+import jakarta.persistence.PersistenceContext;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.security.SecureRandom;
+import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class DepositService {
 
-    private static final Logger log = LoggerFactory.getLogger(DepositService.class);
+    public enum SmsResult { IGNORED, DUPLICATE, STORED, AUTO_APPROVED }
 
-    @Autowired private DepositRequestRepository depositRequestRepository;
-    @Autowired private UserRepository userRepository;
-    @Autowired private BonusHistoryRepository bonusHistoryRepository;
-    @Autowired private SimpMessagingTemplate messagingTemplate;
-    @Autowired private UserServiceImpl userService; // শুধু lock করার জন্য ব্যবহার হবে
+    private static final BigDecimal MIN = new BigDecimal("10.00");
+    private static final BigDecimal MAX = new BigDecimal("500000.00");
+    private static final SecureRandom RND = new SecureRandom();
 
-    private static final BigDecimal REFERRAL_BONUS = new BigDecimal("40.00");
+    /** submit আর SMS একসাথে এলে race এড়াতে (একটি সার্ভার ইনস্ট্যান্সের জন্য) */
+    private static final Object MATCH_LOCK = new Object();
 
-    // ---------------- Create Deposit Request ----------------
-    public DepositRequest createDepositRequest(DepositRequest depositRequest) throws Exception {
-        if (depositRequest.getTransactionId() != null &&
-            depositRequestRepository.existsByTransactionId(depositRequest.getTransactionId())) {
-            throw new Exception("This Transaction ID is already used.");
-        }
+    private final DepositRequestRepository repo;
+    private final PaymentSmsRepository smsRepo;
+    private final PaymentRotationService rotation;
+    private final SimpMessagingTemplate ws;
+    private final TransactionTemplate tx;
 
-        depositRequest.setStatus(DepositRequest.Status.PENDING);
-        return depositRequestRepository.save(depositRequest);
+    @PersistenceContext
+    private EntityManager em;
+
+    public DepositService(DepositRequestRepository repo, PaymentSmsRepository smsRepo,
+                          PaymentRotationService rotation, SimpMessagingTemplate ws,
+                          PlatformTransactionManager tm) {
+        this.repo = repo;
+        this.smsRepo = smsRepo;
+        this.rotation = rotation;
+        this.ws = ws;
+        this.tx = new TransactionTemplate(tm);
     }
 
-    // ---------------- Approve Deposit ----------------
-    @Transactional(rollbackFor = Exception.class)
-    public DepositRequest approveDeposit(Long id) throws Exception {
-        DepositRequest request = depositRequestRepository.findById(id)
-                .orElseThrow(() -> new Exception("Deposit request not found"));
+    // ============ 1) PREPARE: অটো রোটেশনে অ্যাডমিন নম্বর ============
+    @Transactional
+    public DepositRequest prepare(User user, String method, BigDecimal amount) {
+        if (user.isBlocked()) throw err(HttpStatus.FORBIDDEN, "আপনার অ্যাকাউন্ট ব্লকড");
+        amount = validateAmount(amount);
+        String m = PaymentRules.normalizeMethod(method);
 
-        if (request.getStatus() == DepositRequest.Status.APPROVED) {
-            throw new Exception("Deposit already approved");
-        }
+        PaymentRotationService.AccountDto acc = rotation.assignNext(m);
 
-        // Lock user for safe balance update
-        User user = userService.lockAndGetByGameId(request.getUser().getGameId());
-        if (user == null) throw new Exception("User not found for this deposit");
-
-        BigDecimal depositAmount = request.getAmount();
-
-        // Update deposit status first
-        request.setStatus(DepositRequest.Status.APPROVED);
-        depositRequestRepository.saveAndFlush(request);
-
-        // Update user balance
-        user.setDepositBalance(user.getDepositBalance().add(depositAmount));
-        userRepository.saveAndFlush(user);
-
-        // Handle referral bonuses safely
-        handleFirstDepositBonus(user, depositAmount);
-
-        // Notify user
-        messagingTemplate.convertAndSend(
-                "/topic/notifications/" + user.getGameId(),
-                "Your deposit of " + depositAmount + " has been approved!"
-        );
-
-        log.info("✅ Deposit approved for user {} amount {}", user.getGameId(), depositAmount);
-        return request;
+        DepositRequest d = new DepositRequest();
+        d.setUser(user);
+        d.setAmount(amount);
+        d.setMethod(m);
+        d.setPaymentAccountNumber(acc.number());
+        d.setAdminAccountId(acc.id());
+        d.setTransactionId(newServerTxnId());
+        return repo.save(d);
     }
 
-    // ---------------- Handle First Deposit & Referral Bonus ----------------
-    @Transactional(rollbackFor = Exception.class)
-    public void handleFirstDepositBonus(User user, BigDecimal depositAmount) {
-        if (depositAmount == null || depositAmount.compareTo(BigDecimal.ZERO) <= 0) {
-            log.warn("❌ Invalid deposit amount: {}", depositAmount);
-            return;
-        }
-
-        // --- First deposit flag update ---
-        if (!user.isFirstDepositBonusGiven()) {
-            user.setFirstDepositBonusGiven(true);
-            userRepository.saveAndFlush(user);
-            log.info("✅ First deposit detected for user: {}", user.getGameId());
-        }
-
-        // --- Find all pending referral bonuses for this user ---
-        List<BonusHistory> pendingBonuses = bonusHistoryRepository
-                .findBySourceGameIdAndTypeAndStatusOrderByCreatedAtDesc(
-                        user.getGameId(),
-                        "REFERRER_PENDING",
-                        "PENDING"
-                );
-
-        log.info("📌 Found {} pending referral bonuses for new user {}", pendingBonuses.size(), user.getGameId());
-
-        // --- Process and credit referrer ---
-        for (BonusHistory bonus : pendingBonuses) {
-            if ("PENDING".equalsIgnoreCase(bonus.getStatus())) {
-                userRepository.findByGameId(bonus.getUserGameId()).ifPresent(referrer -> {
-                    // 1) First mark COMPLETED
-                    bonus.setStatus("COMPLETED");
-                    bonusHistoryRepository.saveAndFlush(bonus);
-                    log.info("✅ Referral bonus {} marked as COMPLETED", bonus.getId());
-
-                    // 2) Then credit referrer
-                    referrer.setDepositBalance(referrer.getDepositBalance().add(bonus.getAmount()));
-                    userRepository.saveAndFlush(referrer);
-                    log.info("💰 Credited {} to referrer {}", bonus.getAmount(), referrer.getGameId());
-
-                    // 3) Notify referrer
-                    messagingTemplate.convertAndSend(
-                            "/topic/notifications/" + referrer.getGameId(),
-                            "Your referral bonus of " + bonus.getAmount() + " has been credited!"
-                    );
-                });
+    // ============ 2) SUBMIT: ইউজার TrxID দেয় -> অটো ম্যাচ ============
+    public DepositRequest submit(User user, Long depositId, String userTrxId) {
+        synchronized (MATCH_LOCK) {
+            try {
+                return tx.execute(s -> doSubmit(user, depositId, userTrxId));
+            } catch (DataIntegrityViolationException e) {
+                throw err(HttpStatus.CONFLICT, "এই TrxID আগেই ব্যবহার হয়েছে");
             }
         }
     }
 
-    // ---------------- Reject Deposit ----------------
-    @Transactional(rollbackFor = Exception.class)
-    public DepositRequest rejectDeposit(Long id) throws Exception {
-        DepositRequest request = depositRequestRepository.findById(id)
-                .orElseThrow(() -> new Exception("Deposit request not found"));
+    private DepositRequest doSubmit(User user, Long depositId, String userTrxId) {
+        DepositRequest d = repo.findByIdForUpdate(depositId)
+                .orElseThrow(() -> err(HttpStatus.NOT_FOUND, "Deposit not found"));
+        if (!d.getUser().getId().equals(user.getId())) throw err(HttpStatus.NOT_FOUND, "Deposit not found");
+        if (d.getStatus() != Status.PENDING) throw err(HttpStatus.BAD_REQUEST, "শুধু pending ডিপোজিট submit করা যায়");
+        if (d.getUserTransactionId() != null) throw err(HttpStatus.CONFLICT, "TrxID আগেই submit করা হয়েছে");
 
-        if (request.getStatus() == DepositRequest.Status.REJECTED) {
-            throw new Exception("Deposit already rejected");
+        String trx = userTrxId == null ? "" : userTrxId.trim().toUpperCase();
+        if (!trx.matches("[A-Z0-9]{6,30}")) throw err(HttpStatus.BAD_REQUEST, "TrxID সঠিক নয়");
+        if (repo.existsByMethodAndUserTransactionId(d.getMethod(), trx))
+            throw err(HttpStatus.CONFLICT, "এই TrxID আগেই ব্যবহার হয়েছে");
+
+        d.setUserTransactionId(trx);
+        d.setSubmittedAt(LocalDateTime.now());
+        repo.saveAndFlush(d);
+
+        // আগে SMS চলে এসে থাকলে এখনই ম্যাচ
+        Optional<PaymentSms> sms = smsRepo.findFirstByMethodAndTrxIdAndStatus(d.getMethod(), trx, PaymentSms.Status.WAITING);
+        if (sms.isPresent() && sms.get().getAmount().compareTo(d.getAmount()) == 0) {
+            PaymentSms p = sms.get();
+            p.setStatus(PaymentSms.Status.MATCHED);
+            p.setMatchedDepositId(d.getId());
+            smsRepo.save(p);
+            approveInternal(d, null, true);
+        } else {
+            notifyAfterCommit(d.getUser().getGameId(), "আপনার ডিপোজিট রিভিউয়ের জন্য জমা হয়েছে");
         }
+        return d;
+    }
 
-        request.setStatus(DepositRequest.Status.REJECTED);
-        depositRequestRepository.saveAndFlush(request);
+    // ============ 3) মোবাইল থেকে SMS -> অটো আপ্রুভ ============
+    public SmsResult ingestSms(String sender, String message) {
+        SmsParser.Parsed p = SmsParser.parse(sender, message);
+        if (p == null) return SmsResult.IGNORED;
 
-        User user = request.getUser();
-        if (user != null) {
-            messagingTemplate.convertAndSend(
-                    "/topic/notifications/" + user.getGameId(),
-                    "Your deposit of " + request.getAmount() + " has been rejected!"
-            );
-            log.info("❌ Deposit rejected for user {} amount {}", user.getGameId(), request.getAmount());
+        synchronized (MATCH_LOCK) {
+            return tx.execute(s -> {
+                String m = PaymentRules.normalizeMethod(p.method());
+                if (smsRepo.existsByMethodAndTrxId(m, p.trxId())) return SmsResult.DUPLICATE;
+
+                PaymentSms sms = new PaymentSms();
+                sms.setMethod(m);
+                sms.setTrxId(p.trxId());
+                sms.setAmount(p.amount());
+                sms.setSenderNumber(p.senderNumber());
+                sms.setRawMessage(message.length() > 1000 ? message.substring(0, 1000) : message);
+                smsRepo.save(sms);
+
+                Optional<DepositRequest> dep =
+                        repo.findFirstByMethodAndUserTransactionIdAndStatus(m, p.trxId(), Status.PENDING);
+                if (dep.isPresent() && dep.get().getAmount().compareTo(p.amount()) == 0) {
+                    sms.setStatus(PaymentSms.Status.MATCHED);
+                    sms.setMatchedDepositId(dep.get().getId());
+                    smsRepo.save(sms);
+                    approveInternal(dep.get(), null, true);
+                    return SmsResult.AUTO_APPROVED;
+                }
+                return SmsResult.STORED;
+            });
         }
-
-        return request;
     }
 
-    // ---------------- Extra Methods for Controller ----------------
-    public List<DepositRequest> getPendingDeposits() {
-        return depositRequestRepository.findByStatus(DepositRequest.Status.PENDING);
+    // ============ 4) অ্যাডমিন / সাপোর্ট ম্যানুয়াল ============
+    @Transactional
+    public DepositRequest approve(Long id, User admin, String note) {
+        DepositRequest d = lockPending(id);
+        d.setNote(note);
+        approveInternal(d, admin.getId(), false);
+        return d;
     }
 
-    public List<DepositRequest> getDepositsByUser(User user) {
-        return depositRequestRepository.findByUser(user);
+    @Transactional
+    public DepositRequest reject(Long id, User admin, String reason) {
+        DepositRequest d = lockPending(id);
+        d.setStatus(Status.REJECTED);
+        d.setNote(reason);
+        d.setProcessedById(admin.getId());
+        d.setProcessedAt(LocalDateTime.now());
+        repo.save(d);
+        notifyAfterCommit(d.getUser().getGameId(), "আপনার " + d.getAmount() + " টাকার ডিপোজিট রিজেক্ট হয়েছে");
+        return d;
     }
 
-    public List<DepositRequest> getAllDeposits() {
-        return depositRequestRepository.findAll();
+    @Transactional
+    public DepositRequest cancel(Long id, User user) {
+        DepositRequest d = lockPending(id);
+        if (!d.getUser().getId().equals(user.getId())) throw err(HttpStatus.NOT_FOUND, "Deposit not found");
+        d.setStatus(Status.CANCELLED);
+        d.setProcessedAt(LocalDateTime.now());
+        return repo.save(d);
+    }
+
+    // ============ Queries ============
+    @Transactional(readOnly = true)
+    public List<DepositRequest> myDeposits(User user) {
+        return repo.findByUserOrderByIdDesc(user);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<DepositRequest> list(Status status, int page, int size) {
+        PageRequest pr = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), 200),
+                Sort.by(Sort.Direction.DESC, "id"));
+        return status == null ? repo.findAll(pr) : repo.findByStatus(status, pr);
+    }
+
+    // ============ Internals ============
+    private DepositRequest lockPending(Long id) {
+        DepositRequest d = repo.findByIdForUpdate(id)
+                .orElseThrow(() -> err(HttpStatus.NOT_FOUND, "Deposit not found"));
+        if (d.getStatus() != Status.PENDING) throw err(HttpStatus.CONFLICT, "ডিপোজিট আগেই প্রসেস হয়েছে");
+        return d;
+    }
+
+    /** ব্যালেন্স যোগ + status APPROVED (কলারকে অবশ্যই transaction-এর ভেতরে থাকতে হবে) */
+    private void approveInternal(DepositRequest d, Long adminId, boolean auto) {
+        User u = em.find(User.class, d.getUser().getId(), LockModeType.PESSIMISTIC_WRITE);
+        u.addToDepositBalance(d.getAmount());
+        // TODO: first-deposit / referral bonus এখানে দিন (u.isFirstDepositBonusGiven() ইত্যাদি)
+
+        d.setStatus(Status.APPROVED);
+        d.setAutoApproved(auto);
+        d.setProcessedById(adminId);
+        d.setProcessedAt(LocalDateTime.now());
+        repo.save(d);
+
+        notifyAfterCommit(u.getGameId(), "আপনার " + d.getAmount() + " টাকার ডিপোজিট অ্যাপ্রুভ হয়েছে!");
+    }
+
+    private void notifyAfterCommit(String gameId, String msg) {
+        Runnable r = () -> {
+            try {
+                ws.convertAndSend("/topic/notifications/" + gameId,
+                        new NotificationDto("Deposit Update", msg, LocalDateTime.now().toString()));
+            } catch (Exception ignored) { /* নোটিফিকেশন ফেল হলেও ডিপোজিট নষ্ট হবে না */ }
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void afterCommit() { r.run(); }
+            });
+        } else {
+            r.run();
+        }
+    }
+
+    private static BigDecimal validateAmount(BigDecimal a) {
+        if (a == null) throw err(HttpStatus.BAD_REQUEST, "Amount দিন");
+        a = a.setScale(2, RoundingMode.HALF_UP);
+        if (a.compareTo(MIN) < 0) throw err(HttpStatus.BAD_REQUEST, "সর্বনিম্ন ডিপোজিট " + MIN + " টাকা");
+        if (a.compareTo(MAX) > 0) throw err(HttpStatus.BAD_REQUEST, "সর্বোচ্চ ডিপোজিট " + MAX + " টাকা");
+        return a;
+    }
+
+    private String newServerTxnId() {
+        for (int i = 0; i < 30; i++) {
+            String id = "DEP" + String.format("%07d", RND.nextInt(10_000_000));
+            if (!repo.existsByTransactionId(id)) return id;
+        }
+        throw err(HttpStatus.INTERNAL_SERVER_ERROR, "Transaction ID তৈরি করা যায়নি");
+    }
+
+    private static ResponseStatusException err(HttpStatus s, String m) {
+        return new ResponseStatusException(s, m);
     }
 }
