@@ -22,7 +22,7 @@ public class GameCleanupTask {
 
     private static final Logger log = LoggerFactory.getLogger(GameCleanupTask.class);
 
-    private static final long FIRST_ROLL_TIMEOUT_SECONDS = 30;  // ফি কাটার পর অপর জনের রোলের সময়
+    private static final long FIRST_ROLL_TIMEOUT_SECONDS = 60; // ফি কাটার পর অপর জনের রোলের সময়
     private static final long IDLE_NO_ROLL_MINUTES = 2;         // কেউই রোল না করলে
 
     private final GameSessionRepository sessions;
