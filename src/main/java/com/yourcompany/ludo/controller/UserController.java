@@ -7,6 +7,7 @@ import com.yourcompany.ludo.model.User;
 import com.yourcompany.ludo.service.BonusHistoryService;
 import com.yourcompany.ludo.service.NotificationService;
 import com.yourcompany.ludo.service.UserService;
+import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,16 +22,13 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank;
-
 import java.io.File;
 import java.io.IOException;
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Instant;
-import java.util.*;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
@@ -82,12 +80,22 @@ public class UserController {
         return dto;
     }
 
+    /** অন্য ইউজারের জন্য শুধু পাবলিক তথ্য */
+    private Map<String, Object> toPublicProfile(User user) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("gameId", user.getGameId());
+        m.put("displayName", user.getDisplayName());
+        m.put("avatarUrl", user.getAvatarUrl());
+        return m;
+    }
+
     private void broadcastUserUpdate(User user) {
         messagingTemplate.convertAndSend("/topic/user/" + user.getGameId(), convertToDto(user));
     }
 
-    private static BigDecimal toMoney(double value) {
-        return BigDecimal.valueOf(value).setScale(2, RoundingMode.DOWN);
+    private User reload(String gameId) {
+        return userService.findByGameId(gameId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
     }
 
     // ==================== Endpoints ====================
@@ -98,17 +106,26 @@ public class UserController {
     }
 
     @GetMapping("/profile/{gameId}")
-    public ResponseEntity<?> getUserProfileByGameId(@PathVariable String gameId) {
+    public ResponseEntity<?> getUserProfileByGameId(@PathVariable String gameId,
+                                                    Authentication authentication) {
+        User me = getAuthenticatedUser(authentication);
+
+        // রেট লিমিট: রিকোয়েস্টকারী প্রতি আলাদা
+        String limitKey = me.getGameId() + ":" + gameId;
         Instant now = Instant.now();
-        Instant lastRequest = profileRequestTimestamps.get(gameId);
+        Instant lastRequest = profileRequestTimestamps.get(limitKey);
         if (lastRequest != null && now.toEpochMilli() - lastRequest.toEpochMilli() < PROFILE_REQUEST_INTERVAL_MILLIS) {
             return ResponseEntity.status(429).body(Map.of("error", "Too many requests. Please slow down."));
         }
-        profileRequestTimestamps.put(gameId, now);
+        profileRequestTimestamps.put(limitKey, now);
 
-        User user = userService.findByGameId(gameId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
-        return ResponseEntity.ok(convertToDto(user));
+        User target = reload(gameId);
+
+        // নিজের প্রোফাইল হলে পুরো তথ্য, অন্যের হলে শুধু পাবলিক
+        if (me.getGameId().equals(target.getGameId())) {
+            return ResponseEntity.ok(convertToDto(target));
+        }
+        return ResponseEntity.ok(toPublicProfile(target));
     }
 
     @GetMapping("/balance")
@@ -124,19 +141,18 @@ public class UserController {
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Invalid referral code")));
     }
 
+    /** শুধু লগইন করা ইউজার নিজের জন্য */
     @PostMapping("/refer-bonus")
-    public ResponseEntity<?> applyReferralBonus(@RequestParam @NotBlank String gameId) {
-        User referrer = userService.findByGameId(gameId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+    public ResponseEntity<?> applyReferralBonus(Authentication authentication) {
+        User user = getAuthenticatedUser(authentication);
 
-        if (referrer.isReferralBonusClaimed()) {
+        if (user.isReferralBonusClaimed()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Referral bonus already claimed"));
         }
 
-        userService.giveReferralBonus(referrer.getGameId(), referrer.getReferralCode());
+        userService.giveReferralBonus(user.getGameId(), user.getReferralCode());
 
-        User updatedUser = userService.findByGameId(referrer.getGameId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        User updatedUser = reload(user.getGameId());
 
         broadcastUserUpdate(updatedUser);
         notificationService.sendNotification(updatedUser.getId(), "Referral Bonus", "Referral bonus applied: " + updatedUser.getBalance());
@@ -150,8 +166,7 @@ public class UserController {
                                            Authentication authentication) {
         User user = getAuthenticatedUser(authentication);
         userService.updateProfile(user.getGameId(), request.getDisplayName(), request.getAvatarUrl());
-        User updatedUser = userService.findByGameId(user.getGameId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        User updatedUser = reload(user.getGameId());
 
         broadcastUserUpdate(updatedUser);
         notificationService.sendNotification(updatedUser.getId(), "Profile Updated", "Your profile has been successfully updated.");
@@ -179,8 +194,7 @@ public class UserController {
             String avatarUrl = "/avatars/" + filename;
             userService.updateAvatar(user.getGameId(), avatarUrl);
 
-            User updatedUser = userService.findByGameId(user.getGameId())
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+            User updatedUser = reload(user.getGameId());
 
             broadcastUserUpdate(updatedUser);
             notificationService.sendNotification(updatedUser.getId(), "Avatar Updated", "Your avatar has been successfully updated.");
@@ -198,8 +212,7 @@ public class UserController {
         User user = getAuthenticatedUser(authentication);
         userService.updateAvatar(user.getGameId(), null);
 
-        User updatedUser = userService.findByGameId(user.getGameId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        User updatedUser = reload(user.getGameId());
 
         broadcastUserUpdate(updatedUser);
         notificationService.sendNotification(updatedUser.getId(), "Avatar Removed", "Your avatar has been removed");
@@ -208,49 +221,14 @@ public class UserController {
         return ResponseEntity.ok(Map.of("message", "Avatar removed successfully"));
     }
 
-    @PostMapping("/deposit")
-    public ResponseEntity<?> deposit(Authentication authentication,
-                                     @RequestParam @Min(0) double amount) {
-        User user = getAuthenticatedUser(authentication);
-        userService.addBalance(user.getGameId(), toMoney(amount));
-
-        User updatedUser = userService.findByGameId(user.getGameId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
-
-        broadcastUserUpdate(updatedUser);
-        notificationService.sendNotification(updatedUser.getId(), "Deposit", "Deposit successful: " + amount);
-        return ResponseEntity.ok(Map.of("message", "Deposit successful", "balance", updatedUser.getBalance()));
-    }
-
-    @PostMapping("/withdraw")
-    public ResponseEntity<?> withdraw(Authentication authentication,
-                                     @RequestParam @Min(0) double amount) {
-        User user = getAuthenticatedUser(authentication);
-        BigDecimal withdrawAmount = toMoney(amount);
-
-        if (user.getBalance().compareTo(withdrawAmount) < 0) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Insufficient balance"));
-        }
-
-        userService.deductBalance(user.getGameId(), withdrawAmount);
-
-        User updatedUser = userService.findByGameId(user.getGameId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
-
-        broadcastUserUpdate(updatedUser);
-        notificationService.sendNotification(updatedUser.getId(), "Withdrawal", "Withdrawal successful: " + withdrawAmount);
-
-        return ResponseEntity.ok(Map.of("message", "Withdraw successful", "balance", updatedUser.getBalance()));
-    }
-
+    /** শুধু নিজের বোনাস হিস্ট্রি; অন্যের gameId দিলে 403 */
     @GetMapping("/bonus/history")
     public ResponseEntity<List<BonusHistoryDto>> getBonusHistory(@RequestParam(required = false) String gameId,
                                                                  Authentication authentication) {
-        String uid = (gameId != null) ? gameId : getAuthenticatedUser(authentication).getGameId();
-
-        List<BonusHistoryDto> history = bonusHistoryService.getUserBonusHistory(uid);
-
-        return ResponseEntity.ok(history);
+        User me = getAuthenticatedUser(authentication);
+        if (gameId != null && !gameId.equals(me.getGameId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not allowed");
+        }
+        return ResponseEntity.ok(bonusHistoryService.getUserBonusHistory(me.getGameId()));
     }
-
-}
+            }
