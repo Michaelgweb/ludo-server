@@ -51,7 +51,8 @@ public class GameFlowService {
         this.ws = ws;
     }
 
-    public record RollResult(int dice, boolean cancelled, String message) {}
+    /** player = যে রোল করেছে (১/২), nextPlayer = এরপর কার পালা */
+    public record RollResult(int dice, boolean cancelled, String message, int player, int nextPlayer) {}
 
     // =====================================================================
     // 1) MATCH_FOUND -> ONGOING (Cleanup task কল করবে)
@@ -93,7 +94,7 @@ public class GameFlowService {
             BigDecimal fee = s.getEntryFee();
             if (ps[0].getBalance().compareTo(fee) < 0 || ps[1].getBalance().compareTo(fee) < 0) {
                 close(s, GameStatus.CANCELLED, "ব্যালেন্স অপর্যাপ্ত, ম্যাচ বাতিল");
-                return new RollResult(0, true, "Insufficient balance");
+                return new RollResult(0, true, "Insufficient balance", me, s.getCurrentPlayer());
             }
             for (User u : ps) {
                 u.deduct(fee);
@@ -104,13 +105,28 @@ public class GameFlowService {
         }
 
         int dice = rnd.nextInt(6) + 1;                         // সার্ভারে র‍্যান্ডম
+
+        // পরপর তিনটি ৬ হলে তৃতীয়টি ১-৫ এ বদলে যায় (আপনার আগের নিয়ম)
+        if (dice == 6) {
+            s.setConsecutiveSixCount(s.getConsecutiveSixCount() + 1);
+            if (s.getConsecutiveSixCount() >= 3) {
+                dice = rnd.nextInt(5) + 1;
+                s.setConsecutiveSixCount(0);
+            }
+        } else {
+            s.setConsecutiveSixCount(0);
+        }
+
         if (me == 1) s.setPlayer1DiceCount(s.getPlayer1DiceCount() + 1);
         else s.setPlayer2DiceCount(s.getPlayer2DiceCount() + 1);
         s.setLastDiceValue(dice);
         s.setDiceOwner(me);
 
-        // টোকেন মুভ ও টার্ন বদলের লজিক আপনার আগের কোডেই থাকবে
-        return new RollResult(dice, false, "OK");
+        // ৬ না হলে পালা বদল
+        int next = (dice == 6) ? me : (me == 1 ? 2 : 1);
+        s.setCurrentPlayer(next);
+
+        return new RollResult(dice, false, "OK", me, next);
     }
 
     // =====================================================================
