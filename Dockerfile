@@ -10,8 +10,8 @@ COPY src ./src
 # Build the project (skip tests if needed)
 RUN mvn clean package -DskipTests
 
-# Use smaller JDK image for runtime
-FROM openjdk:17-jdk-alpine
+# Use smaller JRE image for runtime
+FROM eclipse-temurin:17-jre-alpine
 
 WORKDIR /app
 
@@ -21,5 +21,5 @@ COPY --from=build /app/target/*.jar app.jar
 # Expose port
 EXPOSE 8080
 
-# Run the jar
-ENTRYPOINT ["java","-jar","app.jar"]
+# Run the jar (Render এর PORT ব্যবহার করে)
+ENTRYPOINT ["sh", "-c", "java -Xmx400m -jar app.jar --server.port=${PORT:-8080}"]
