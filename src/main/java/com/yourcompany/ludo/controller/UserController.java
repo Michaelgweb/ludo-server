@@ -141,25 +141,7 @@ public class UserController {
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", "Invalid referral code")));
     }
 
-    /** শুধু লগইন করা ইউজার নিজের জন্য */
-    @PostMapping("/refer-bonus")
-    public ResponseEntity<?> applyReferralBonus(Authentication authentication) {
-        User user = getAuthenticatedUser(authentication);
-
-        if (user.isReferralBonusClaimed()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Referral bonus already claimed"));
-        }
-
-        userService.giveReferralBonus(user.getGameId(), user.getReferralCode());
-
-        User updatedUser = reload(user.getGameId());
-
-        broadcastUserUpdate(updatedUser);
-        notificationService.sendNotification(updatedUser.getId(), "Referral Bonus", "Referral bonus applied: " + updatedUser.getBalance());
-        logger.info("Referral bonus applied to user {}: {}", updatedUser.getGameId(), updatedUser.getBalance());
-
-        return ResponseEntity.ok(Map.of("message", "Referral bonus applied successfully", "balance", updatedUser.getBalance()));
-    }
+    // ✅ /refer-bonus সরানো হয়েছে: রেফারেল বোনাস রেজিস্ট্রেশনের সময়ই UserService থেকে রেকর্ড হয়
 
     @PutMapping("/profile")
     public ResponseEntity<?> updateProfile(@Valid @RequestBody ProfileUpdateRequest request,
@@ -231,4 +213,4 @@ public class UserController {
         }
         return ResponseEntity.ok(bonusHistoryService.getUserBonusHistory(me.getGameId()));
     }
-            }
+}
