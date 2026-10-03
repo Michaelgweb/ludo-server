@@ -22,6 +22,7 @@ import org.springframework.transaction.annotation.*;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -44,6 +45,8 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     // ================= BONUS =================
     private static final BigDecimal SIGNUP_BONUS = bd("20.00");
     private static final BigDecimal REFERRER_PENDING_BONUS = bd("40.00");
+
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private static BigDecimal bd(String value) {
         return new BigDecimal(value).setScale(2, RoundingMode.DOWN);
@@ -79,11 +82,10 @@ public class UserServiceImpl implements UserService, UserDetailsService {
 
     // ================= GAME ID =================
     private String generateUniqueGameId() {
-        Random random = new Random();
         String gameId;
 
         do {
-            gameId = String.format("%012d", Math.abs(random.nextLong()) % 1000000000000L);
+            gameId = String.format("%012d", SECURE_RANDOM.nextLong(1_000_000_000_000L));
         } while (userRepository.findByGameId(gameId).isPresent());
 
         return gameId;
@@ -92,11 +94,10 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     // ================= REFERRAL =================
     @Override
     public String generateUniqueReferralCode() {
-        Random random = new Random();
         String code;
 
         do {
-            code = String.format("%06d", random.nextInt(1000000));
+            code = String.format("%06d", SECURE_RANDOM.nextInt(1_000_000));
         } while (userRepository.findByReferralCode(code).isPresent());
 
         return code;
@@ -315,18 +316,49 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     }
 
     // ================= REFERRAL BONUS =================
+    /**
+     * রেফারারের জন্য PENDING বোনাস রেকর্ড করে (টাকা এখানে যোগ হয় না)।
+     *
+     * গার্ড:
+     *  1) নিজেকে রেফার করা যাবে না
+     *  2) নতুন ইউজারের referredBy অবশ্যই এই রেফারার হতে হবে (আসল রেফারেল)
+     *  3) রেফারারকে লক করে ডুপ্লিকেট চেক, তাই একসাথে দুই রিকোয়েস্ট এলেও একটাই রেকর্ড
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void giveReferralBonus(String newUserGameId, String referralCode) {
-        userRepository.findByReferralCode(referralCode).ifPresent(referrer -> {
-            boolean exists = bonusHistoryRepository.existsByUserGameIdAndSourceGameIdAndTypeAndStatus(
-                    referrer.getGameId(), newUserGameId, "REFERRER_PENDING", "PENDING"
-            );
+        if (newUserGameId == null || referralCode == null || referralCode.isBlank()) {
+            return;
+        }
 
-            if (!exists) {
-                recordBonus(referrer.getGameId(), "REFERRER_PENDING", REFERRER_PENDING_BONUS, newUserGameId, "PENDING");
-            }
-        });
+        User newUser = userRepository.findByGameId(newUserGameId).orElse(null);
+        User referrerRef = userRepository.findByReferralCode(referralCode.trim()).orElse(null);
+
+        if (newUser == null || referrerRef == null) {
+            return;
+        }
+
+        if (referrerRef.getGameId().equals(newUser.getGameId())) {
+            log.warn("Self referral blocked: gameId={}", newUserGameId);
+            return;
+        }
+
+        if (!referrerRef.getGameId().equals(newUser.getReferredBy())) {
+            log.warn("Referral mismatch blocked: newUser={} referredBy={} referrer={}",
+                    newUserGameId, newUser.getReferredBy(), referrerRef.getGameId());
+            return;
+        }
+
+        User referrer = lockAndGetByGameId(referrerRef.getGameId());
+
+        boolean pending = bonusHistoryRepository.existsByUserGameIdAndSourceGameIdAndTypeAndStatus(
+                referrer.getGameId(), newUserGameId, "REFERRER_PENDING", "PENDING");
+        boolean completed = bonusHistoryRepository.existsByUserGameIdAndSourceGameIdAndTypeAndStatus(
+                referrer.getGameId(), newUserGameId, "REFERRER_PENDING", "COMPLETED");
+
+        if (!pending && !completed) {
+            recordBonus(referrer.getGameId(), "REFERRER_PENDING", REFERRER_PENDING_BONUS, newUserGameId, "PENDING");
+        }
     }
 
     // ================= REGISTER =================
@@ -508,6 +540,7 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     }
 
     // ================= BALANCE UPDATE EVENT =================
+    // ⚠️ নামে notify হলেও এটা amount যোগ করে। কোথাও কল হচ্ছে কিনা দেখে নিন।
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void notifyBalanceUpdate(String gameId, BigDecimal amount) {
@@ -567,10 +600,21 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         addWinningBalance(gameId, amount);
     }
 
+    // ✅ FIX: আগে এটা lifetimeEarnings বাড়াত; এখন সঠিকভাবে lifetimeWithdraw বাড়ায়
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addLifetimeWithdraw(String gameId, BigDecimal amount) {
-        addToLifetimeEarnings(gameId, amount);
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Invalid amount");
+        }
+
+        User user = lockAndGetByGameId(gameId);
+
+        BigDecimal current = user.getLifetimeWithdraw() == null ? BigDecimal.ZERO : user.getLifetimeWithdraw();
+        user.setLifetimeWithdraw(current.add(amount).setScale(2, RoundingMode.DOWN));
+
+        userRepository.saveAndFlush(user);
+        sendEvent(EVENT_LIFETIME_UPDATED, gameId, toDto(user));
     }
 
     // ================= REFERRAL UPDATES =================
