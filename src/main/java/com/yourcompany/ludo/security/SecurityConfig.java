@@ -5,6 +5,7 @@ import com.yourcompany.ludo.service.impl.UserDetailsServiceImpl;
 import com.yourcompany.ludo.util.JwtFilter;
 import com.yourcompany.ludo.util.JwtUtil;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
@@ -59,6 +60,23 @@ public class SecurityConfig {
         return new QueryParamJwtAuthenticationFilter(jwtUtil, userRepository);
     }
 
+    // Spring Boot যেন ফিল্টার দুটো আলাদাভাবে সার্ভলেট চেইনে না বসায়
+    // (এগুলো শুধু Security Filter Chain-এর ভেতরে চলবে)
+    @Bean
+    public FilterRegistrationBean<JwtFilter> jwtFilterRegistration(JwtFilter filter) {
+        FilterRegistrationBean<JwtFilter> reg = new FilterRegistrationBean<>(filter);
+        reg.setEnabled(false);
+        return reg;
+    }
+
+    @Bean
+    public FilterRegistrationBean<QueryParamJwtAuthenticationFilter> queryJwtFilterRegistration() {
+        FilterRegistrationBean<QueryParamJwtAuthenticationFilter> reg =
+                new FilterRegistrationBean<>(queryParamJwtAuthenticationFilter());
+        reg.setEnabled(false);
+        return reg;
+    }
+
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
@@ -81,6 +99,15 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
+                // Admin Endpoints (public তালিকার আগে রাখা হয়েছে, নইলে /api/payment-config/** আগেই permitAll হয়ে যায়)
+                .requestMatchers(
+                    "/api/payment-config/admin/**",
+                    "/api/withdraw/approve/**",
+                    "/api/withdraw/reject/**",
+                    "/api/withdraw/pending/**",
+                    "/api/withdraw/complete/**"
+                ).hasRole("ADMIN")
+
                 // Public Endpoints
                 .requestMatchers(
                     "/",
@@ -98,15 +125,6 @@ public class SecurityConfig {
                     "/actuator/health",
                     "/ludo-ws/**"
                 ).permitAll()
-
-                // Admin Endpoints
-                .requestMatchers(
-                    "/api/payment-config/admin/**",
-                    "/api/withdraw/approve/**",
-                    "/api/withdraw/reject/**",
-                    "/api/withdraw/pending/**",
-                    "/api/withdraw/complete/**"
-                ).hasRole("ADMIN")
 
                 // Authenticated Endpoints
                 .requestMatchers("/api/user/profile/**").authenticated()
