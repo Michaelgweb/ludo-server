@@ -51,8 +51,12 @@ public class GameFlowService {
         this.ws = ws;
     }
 
-    /** player = যে রোল করেছে (১/২), nextPlayer = এরপর কার পালা */
-    public record RollResult(int dice, boolean cancelled, String message, int player, int nextPlayer) {}
+    /**
+     * player = যে রোল করেছে (১/২), nextPlayer = চাল শেষে কার রোল,
+     * canMove = true হলে player কে এখন /move কল করতে হবে
+     */
+    public record RollResult(int dice, boolean cancelled, String message,
+                             int player, int nextPlayer, boolean canMove) {}
 
     // =====================================================================
     // 1) MATCH_FOUND -> ONGOING (Cleanup task কল করবে)
@@ -88,13 +92,17 @@ public class GameFlowService {
         if (s.getCurrentPlayer() != me) {
             throw new IllegalStateException("Not your turn");
         }
+        // আগের রোলের টোকেন চাল বাকি থাকলে নতুন রোল নয়
+        if (s.isPendingMove()) {
+            throw new IllegalStateException("Previous move pending");
+        }
 
         if (!s.isFeeDeducted()) {
             User[] ps = lockPlayers(s);                       // id অনুযায়ী লক, ডেডলক নেই
             BigDecimal fee = s.getEntryFee();
             if (ps[0].getBalance().compareTo(fee) < 0 || ps[1].getBalance().compareTo(fee) < 0) {
                 close(s, GameStatus.CANCELLED, "ব্যালেন্স অপর্যাপ্ত, ম্যাচ বাতিল");
-                return new RollResult(0, true, "Insufficient balance", me, s.getCurrentPlayer());
+                return new RollResult(0, true, "Insufficient balance", me, s.getCurrentPlayer(), false);
             }
             for (User u : ps) {
                 u.deduct(fee);
@@ -122,15 +130,19 @@ public class GameFlowService {
         s.setLastDiceValue(dice);
         s.setDiceOwner(me);
 
+        // বৈধ চাল থাকলে খেলোয়াড়কে /move কল করতে হবে, না থাকলে পালা নিজে থেকেই যাবে
+        boolean canMove = LudoRules.hasLegalMove(s, me, dice);
+        s.setPendingMove(canMove);
+
         // ৬ না হলে পালা বদল
         int next = (dice == 6) ? me : (me == 1 ? 2 : 1);
         s.setCurrentPlayer(next);
 
-        return new RollResult(dice, false, "OK", me, next);
+        return new RollResult(dice, false, "OK", me, next, canMove);
     }
 
     // =====================================================================
-    // 3) স্বাভাবিকভাবে কেউ জিতলে (টোকেন লজিক থেকে কল করুন)
+    // 3) স্বাভাবিকভাবে কেউ জিতলে (GameMoveService থেকে কল হয়)
     // =====================================================================
     @Transactional
     public void declareWinner(Long sid, String winnerGameId) {
