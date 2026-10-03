@@ -66,13 +66,19 @@ public class GameSession {
     @Column(name = "consecutive_six_count", nullable = false)
     private int consecutiveSixCount = 0;
 
+    // রোলের পর টোকেন চাল বাকি থাকলে true
+    @Column(name = "pending_move", nullable = false, columnDefinition = "boolean default false")
+    private boolean pendingMove = false;
+
     @ElementCollection
     @CollectionTable(name = "player1_tokens", joinColumns = @JoinColumn(name = "game_session_id"))
+    @OrderColumn(name = "token_index")
     @Column(name = "token_position")
     private List<Integer> player1Tokens = new ArrayList<>();
 
     @ElementCollection
     @CollectionTable(name = "player2_tokens", joinColumns = @JoinColumn(name = "game_session_id"))
+    @OrderColumn(name = "token_index")
     @Column(name = "token_position")
     private List<Integer> player2Tokens = new ArrayList<>();
 
@@ -169,6 +175,9 @@ public class GameSession {
 
     public int getConsecutiveSixCount() { return consecutiveSixCount; }
     public void setConsecutiveSixCount(int v) { this.consecutiveSixCount = v; }
+
+    public boolean isPendingMove() { return pendingMove; }
+    public void setPendingMove(boolean pendingMove) { this.pendingMove = pendingMove; }
 
     public List<Integer> getPlayer1Tokens() { return player1Tokens; }
     public void setPlayer1Tokens(List<Integer> t) { this.player1Tokens = t; }
