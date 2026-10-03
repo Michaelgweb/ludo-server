@@ -10,7 +10,7 @@
   <packaging>jar</packaging>
 
   <name>ludo-server</name>
-  <description>JWT Auth with PostgreSQL</description>
+  <description>Ludo server: JWT Auth, PostgreSQL, WebSocket</description>
 
   <parent>
     <groupId>org.springframework.boot</groupId>
@@ -24,7 +24,7 @@
   </properties>
 
   <dependencies>
-    <!-- Spring Boot Starters -->
+    <!-- Web (Jackson ও এর ভেতরেই আছে) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
@@ -44,6 +44,7 @@
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
     </dependency>
 
     <!-- JWT -->
@@ -77,43 +78,31 @@
       <version>3.0.2</version>
     </dependency>
 
-    <!-- Swagger for API documentation -->
+    <!-- Swagger -->
     <dependency>
       <groupId>org.springdoc</groupId>
       <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
       <version>2.2.0</version>
     </dependency>
 
-    <!-- Bean Validation -->
+    <!-- Bean Validation (Hibernate Validator ও এর ভেতরেই আছে) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
 
-    <!-- Hibernate Validator (implementation of validation API) -->
-    <dependency>
-      <groupId>org.hibernate.validator</groupId>
-      <artifactId>hibernate-validator</artifactId>
-      <version>8.0.1.Final</version>
-    </dependency>
-
-    <!-- Dev Tools -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-devtools</artifactId>
-      <scope>runtime</scope>
-    </dependency>
-
-    <!-- WebSocket support -->
+    <!-- WebSocket (spring-messaging ও এর ভেতরেই আছে) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-websocket</artifactId>
     </dependency>
 
-    <!-- Spring Messaging -->
+    <!-- Dev Tools: শুধু লোকাল, প্রোডাকশন jar এ যায় না -->
     <dependency>
-      <groupId>org.springframework</groupId>
-      <artifactId>spring-messaging</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-devtools</artifactId>
+      <scope>runtime</scope>
+      <optional>true</optional>
     </dependency>
 
     <!-- Lombok -->
@@ -131,12 +120,6 @@
       <version>1.5</version>
     </dependency>
 
-    <!-- JSON processing -->
-    <dependency>
-      <groupId>com.fasterxml.jackson.core</groupId>
-      <artifactId>jackson-databind</artifactId>
-    </dependency>
-
     <!-- jakarta.annotation-api -->
     <dependency>
       <groupId>jakarta.annotation</groupId>
@@ -146,10 +129,20 @@
   </dependencies>
 
   <build>
+    <!-- jar এর নাম হবে target/app.jar -->
+    <finalName>app</finalName>
     <plugins>
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+            </exclude>
+          </excludes>
+        </configuration>
       </plugin>
     </plugins>
   </build>
