@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/payment-config")
@@ -57,13 +58,15 @@ public class PaymentConfigController {
     // =====================================
     @GetMapping("/{method}")
     public ResponseEntity<?> getConfig(@PathVariable String method) {
-        return service.getConfig(method)
-                .map(ResponseEntity::ok)
-                .orElseGet(() -> {
-                    Map<String, String> error = new HashMap<>();
-                    error.put("error", "Payment method not found");
-                    return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
-                });
+        Optional<PaymentConfig> config = service.getConfig(method);
+
+        if (config.isPresent()) {
+            return ResponseEntity.ok(config.get());
+        }
+
+        Map<String, String> error = new HashMap<>();
+        error.put("error", "Payment method not found");
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
     }
 
     // =====================================
