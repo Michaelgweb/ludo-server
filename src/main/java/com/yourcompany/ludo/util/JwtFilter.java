@@ -40,6 +40,7 @@ public class JwtFilter extends OncePerRequestFilter {
         this.userRepository = userRepository;
     }
 
+    // SecurityConfig-এর permitAll তালিকার সাথে মিল রাখুন
     private static final List<String> PUBLIC_PATH_PREFIXES = List.of(
             "/swagger-ui", "/v3/api-docs", "/swagger-resources", "/webjars",
             "/auth",
@@ -51,62 +52,70 @@ public class JwtFilter extends OncePerRequestFilter {
     );
 
     @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        String path = request.getServletPath();
+
+        // CORS preflight
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
+        // রুট "/" আলাদা করে চেক করতে হবে (startsWith("/") সব পাথ ধরে ফেলত)
+        if (path == null || path.isEmpty() || path.equals("/")) {
+            return true;
+        }
+        return PUBLIC_PATH_PREFIXES.stream().anyMatch(path::startsWith);
+    }
+
+    @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
-        String path = request.getServletPath();
+        final String authHeader = request.getHeader("Authorization");
 
-        // Skip public endpoints
-        if (PUBLIC_PATH_PREFIXES.stream().anyMatch(path::startsWith)) {
+        // টোকেন না থাকলে এখানে ব্লক করবেন না; Spring Security নিজেই protected URL-এ 401 দেবে।
+        // (query param ?token= দিয়ে লগইন QueryParamJwtAuthenticationFilter হ্যান্ডেল করে)
+        if (authHeader == null || !authHeader.trim().startsWith("Bearer ")) {
             filterChain.doFilter(request, response);
             return;
         }
 
-        final String authHeader = request.getHeader("Authorization");
+        String jwt = authHeader.trim().substring(7);
+        try {
+            Key key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+            Claims claims = Jwts.parserBuilder()
+                    .setSigningKey(key)
+                    .build()
+                    .parseClaimsJws(jwt)
+                    .getBody();
 
-        if (authHeader != null && authHeader.trim().startsWith("Bearer ")) {
-            String jwt = authHeader.trim().substring(7);
-            try {
-                Key key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
-                Claims claims = Jwts.parserBuilder()
-                        .setSigningKey(key)
-                        .build()
-                        .parseClaimsJws(jwt)
-                        .getBody();
+            String gameId = claims.getSubject();
 
-                String gameId = claims.getSubject();
+            Optional<User> userOptional = userRepository.findByGameId(gameId);
+            if (userOptional.isPresent()) {
+                User user = userOptional.get();
 
-                Optional<User> userOptional = userRepository.findByGameId(gameId);
-                if (userOptional.isPresent()) {
-                    User user = userOptional.get();
+                List<SimpleGrantedAuthority> authorities = List.of(
+                        new SimpleGrantedAuthority("ROLE_" + user.getRole().name())
+                );
 
-                    List<SimpleGrantedAuthority> authorities = List.of(
-                            new SimpleGrantedAuthority("ROLE_" + user.getRole().name())
-                    );
-
-                    UsernamePasswordAuthenticationToken auth =
-                            new UsernamePasswordAuthenticationToken(user, null, authorities);
-                    auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                    SecurityContextHolder.getContext().setAuthentication(auth);
-                } else {
-                    logger.error("Token validation failed: User not found for gameId={}", gameId);
-                    response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Invalid token");
-                    return;
-                }
-
-            } catch (io.jsonwebtoken.ExpiredJwtException e) {
-                logger.warn("Token expired: {}", e.getMessage());
-                response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Token expired");
-                return;
-            } catch (Exception e) {
-                logger.error("Token validation failed: {}", e.getMessage());
+                UsernamePasswordAuthenticationToken auth =
+                        new UsernamePasswordAuthenticationToken(user, null, authorities);
+                auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                SecurityContextHolder.getContext().setAuthentication(auth);
+            } else {
+                logger.error("Token validation failed: User not found for gameId={}", gameId);
                 response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Invalid token");
                 return;
             }
-        } else {
-            logger.warn("No Authorization header found for protected endpoint: {}", path);
-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Missing Authorization header");
+
+        } catch (io.jsonwebtoken.ExpiredJwtException e) {
+            logger.warn("Token expired: {}", e.getMessage());
+            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Token expired");
+            return;
+        } catch (Exception e) {
+            logger.error("Token validation failed: {}", e.getMessage());
+            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Invalid token");
             return;
         }
 
