@@ -26,16 +26,15 @@ import java.util.concurrent.TimeUnit;
  * WebSocket ডিসকানেক্ট হলে সাথে সাথে হারায় না। GRACE_SECONDS এর মধ্যে ফিরে এলে কিছু হয় না,
  * না ফিরলে GameFlowService.leave() কল হয় (নিয়ম অনুযায়ী বাতিল/রিফান্ড অথবা হার)।
  *
- * ইউজার শনাক্ত করার উপায়:
- *  ১) (নিরাপদ) handshake এ JWT দিয়ে Principal সেট থাকলে principal.getName() = gameId
- *  ২) না থাকলে "/topic/game/{gameId}" বা "/topic/user/{gameId}" সাবস্ক্রাইব থেকে ধরা হয়
- *     (এটা নকল করা সম্ভব; কেউ অন্যের topic এ সাবস্ক্রাইব করে বিভ্রান্ত করতে পারে। ১ নম্বর ব্যবহার করুন)
+ * ইউজার শনাক্ত হয় শুধু handshake এর JWT Principal (principal.getName() = gameId) থেকে।
+ * topic নাম থেকে অনুমান করা বাদ দিয়েছি: /topic/game/{sessionId} সাবস্ক্রাইবে
+ * সেশন নম্বরকে gameId ধরে ভুল হতো, আর নকলও করা যেত।
  */
 @Component
 public class GameDisconnectListener {
 
     private static final Logger log = LoggerFactory.getLogger(GameDisconnectListener.class);
-    private static final long GRACE_SECONDS = 20;
+    private static final long GRACE_SECONDS = 60;
 
     private final GameSessionRepository sessions;
     private final GameFlowService flow;
@@ -61,14 +60,15 @@ public class GameDisconnectListener {
         }
     }
 
+    /** onConnected এ user না পেলে সাবস্ক্রাইবের সময় Principal থেকে আবার চেষ্টা (ব্যাকআপ) */
     @EventListener
     public void onSubscribe(SessionSubscribeEvent event) {
         StompHeaderAccessor acc = StompHeaderAccessor.wrap(event.getMessage());
         String wsId = acc.getSessionId();
-        String dest = acc.getDestination();
-        if (wsId == null || dest == null || wsToGame.containsKey(wsId)) return;   // Principal আগেই পাওয়া গেলে বাদ
-        if (dest.startsWith("/topic/game/") || dest.startsWith("/topic/user/")) {
-            register(wsId, dest.substring(dest.lastIndexOf('/') + 1));
+        if (wsId == null || wsToGame.containsKey(wsId)) return;
+        Principal user = acc.getUser();
+        if (user != null && user.getName() != null) {
+            register(wsId, user.getName());
         }
     }
 
