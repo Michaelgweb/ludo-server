@@ -1,5 +1,6 @@
 package com.yourcompany.ludo.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -174,7 +175,9 @@ public class User implements UserDetails {
     public String getGameId() { return gameId; }
     public void setGameId(String gameId) { this.gameId = gameId; }
 
+    // পাসওয়ার্ড হ্যাশ কখনো JSON রেসপন্সে যাবে না
     @Override
+    @JsonIgnore
     public String getPassword() { return password; }
     public void setPassword(String password) { this.password = password; }
 
@@ -278,9 +281,10 @@ public class User implements UserDetails {
     public void setTotalDevices(Integer totalDevices) { this.totalDevices = totalDevices; }
 
     // ---------------- UserDetails ----------------
+    // ✅ FIX: "ROLE_" প্রিফিক্স না থাকলে hasRole("ADMIN") কাজ করে না
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of(new SimpleGrantedAuthority(this.role.name()));
+        return List.of(new SimpleGrantedAuthority("ROLE_" + this.role.name()));
     }
 
     @Override
