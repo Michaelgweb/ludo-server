@@ -81,6 +81,39 @@ public class User implements UserDetails {
     @Column(nullable = false)
     private boolean referrerBonusGiven = false;
 
+    // ---------------- লগইন, ডিভাইস ও লোকেশন তথ্য (সব nullable, পুরনো ডেটাবেসে সমস্যা হবে না) ----------------
+    @Column(name = "login_count")
+    private Integer loginCount = 0;
+
+    @Column(name = "last_login_time")
+    private LocalDateTime lastLoginTime;
+
+    private String deviceId;
+    private String deviceName;
+    private String deviceModel;
+    private String osName;
+    private String osVersion;
+    private String browser;
+
+    @Column(length = 512)
+    private String userAgent;
+
+    private String ipAddress;
+    private String lastLoginIp;
+    private String country;
+    private String city;
+    private Double latitude;
+    private Double longitude;
+
+    @Column(columnDefinition = "boolean default false")
+    private Boolean blocked = false;
+
+    @Column(columnDefinition = "boolean default false")
+    private Boolean phoneVerified = false;
+
+    @Column(name = "total_devices")
+    private Integer totalDevices = 0;
+
     public User() {
         this.referralCode = generateReferralCode();
     }
@@ -124,6 +157,11 @@ public class User implements UserDetails {
         if (amount != null && amount.signum() > 0) {
             this.lifetimeEarnings = getLifetimeEarnings().add(amount);
         }
+    }
+
+    // ---------------- Device helper ----------------
+    public void increaseDeviceCount() {
+        this.totalDevices = getTotalDevices() + 1;
     }
 
     // ---------------- Getters & Setters ----------------
@@ -184,6 +222,60 @@ public class User implements UserDetails {
 
     public boolean isReferrerBonusGiven() { return referrerBonusGiven; }
     public void setReferrerBonusGiven(boolean v) { this.referrerBonusGiven = v; }
+
+    public int getLoginCount() { return loginCount != null ? loginCount : 0; }
+    public void setLoginCount(int v) { this.loginCount = v; }
+
+    public LocalDateTime getLastLoginTime() { return lastLoginTime; }
+    public void setLastLoginTime(LocalDateTime t) { this.lastLoginTime = t; }
+
+    public String getDeviceId() { return deviceId; }
+    public void setDeviceId(String deviceId) { this.deviceId = deviceId; }
+
+    public String getDeviceName() { return deviceName; }
+    public void setDeviceName(String deviceName) { this.deviceName = deviceName; }
+
+    public String getDeviceModel() { return deviceModel; }
+    public void setDeviceModel(String deviceModel) { this.deviceModel = deviceModel; }
+
+    public String getOsName() { return osName; }
+    public void setOsName(String osName) { this.osName = osName; }
+
+    public String getOsVersion() { return osVersion; }
+    public void setOsVersion(String osVersion) { this.osVersion = osVersion; }
+
+    public String getBrowser() { return browser; }
+    public void setBrowser(String browser) { this.browser = browser; }
+
+    public String getUserAgent() { return userAgent; }
+    public void setUserAgent(String userAgent) { this.userAgent = userAgent; }
+
+    public String getIpAddress() { return ipAddress; }
+    public void setIpAddress(String ipAddress) { this.ipAddress = ipAddress; }
+
+    public String getLastLoginIp() { return lastLoginIp; }
+    public void setLastLoginIp(String lastLoginIp) { this.lastLoginIp = lastLoginIp; }
+
+    public String getCountry() { return country; }
+    public void setCountry(String country) { this.country = country; }
+
+    public String getCity() { return city; }
+    public void setCity(String city) { this.city = city; }
+
+    public Double getLatitude() { return latitude; }
+    public void setLatitude(Double latitude) { this.latitude = latitude; }
+
+    public Double getLongitude() { return longitude; }
+    public void setLongitude(Double longitude) { this.longitude = longitude; }
+
+    public boolean isBlocked() { return Boolean.TRUE.equals(blocked); }
+    public void setBlocked(boolean blocked) { this.blocked = blocked; }
+
+    public Boolean getPhoneVerified() { return phoneVerified; }
+    public void setPhoneVerified(Boolean phoneVerified) { this.phoneVerified = phoneVerified; }
+
+    public Integer getTotalDevices() { return totalDevices != null ? totalDevices : 0; }
+    public void setTotalDevices(Integer totalDevices) { this.totalDevices = totalDevices; }
 
     // ---------------- UserDetails ----------------
     @Override
