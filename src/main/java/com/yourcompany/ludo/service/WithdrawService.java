@@ -74,10 +74,9 @@ public class WithdrawService {
             throw new Exception("Withdraw already processed");
         }
 
-        // Refund balance
+        // Refund: উইথড্র ব্যালেন্সে ফেরত (কাটাও হয়েছিল সেখান থেকেই)
         User user = request.getUser();
-        BigDecimal balance = user.getBalance() == null ? BigDecimal.ZERO : user.getBalance();
-        user.setBalance(balance.add(request.getAmount()));
+        user.addToWithdrawBalance(request.getAmount());
         userRepository.save(user);
 
         // Ensure unique transaction ID
