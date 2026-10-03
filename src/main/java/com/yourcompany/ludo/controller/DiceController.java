@@ -104,6 +104,29 @@ public class DiceController {
     }
 
     /**
+     * ম্যাচের বর্তমান অবস্থা। অ্যাপ রিস্টার্ট বা WebSocket রিকানেক্টের পর
+     * ক্লায়েন্ট এটা কল করে টোকেন, পালা ও পেন্ডিং চাল ফিরে পায়।
+     */
+    @GetMapping("/state/{sessionId}")
+    public ResponseEntity<?> state(@PathVariable Long sessionId,
+                                   @RequestHeader(value = "Authorization", required = false) String authHeader) {
+        try {
+            String gameId = gameIdFrom(authHeader);
+            return ResponseEntity.ok(moves.state(sessionId, gameId));
+        } catch (SecurityException e) {
+            return ResponseEntity.status(401).body(Map.of("error", "Missing Authorization header"));
+        } catch (IllegalArgumentException e) {
+            if ("Session not found".equals(e.getMessage())) {
+                return ResponseEntity.status(404).body(Map.of("error", "Session not found"));
+            }
+            return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
+        } catch (Exception e) {
+            log.error("state failed", e);
+            return ResponseEntity.status(500).body(Map.of("error", "সার্ভারে সমস্যা হয়েছে"));
+        }
+    }
+
+    /**
      * ইউজার নিজে ব্যাক/কুইট দিলে এটা কল করবে। নিয়ম GameFlowService.leave এ:
      * দুজন রোল করার আগে হলে বাতিল/রিফান্ড, পরে হলে সে হারবে।
      */
@@ -130,4 +153,4 @@ public class DiceController {
         }
         return jwtUtil.getGameIdFromToken(authHeader.substring(7));
     }
-}
+                }
