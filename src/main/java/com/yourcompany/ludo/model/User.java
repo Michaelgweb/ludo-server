@@ -17,7 +17,7 @@ import java.util.Objects;
 @Table(name = "users")
 public class User implements UserDetails {
 
-    public enum Role { USER, ADMIN }
+    public enum Role { USER, STAFF, ADMIN }
     public enum Status { ONLINE, OFFLINE }
 
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -315,4 +315,4 @@ public class User implements UserDetails {
         return "User{id=" + id + ", gameId='" + gameId + "', depositBalance=" + depositBalance
                 + ", withdrawBalance=" + withdrawBalance + ", role=" + role + ", status=" + status + "}";
     }
-}
+    }
