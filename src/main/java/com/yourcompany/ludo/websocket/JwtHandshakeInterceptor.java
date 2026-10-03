@@ -79,7 +79,7 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
             if (jwtUtil.validateToken(token, gameId)) {
                 // ✅ Set attributes and Principal for private messaging
                 WebSocketPrincipal principal = new WebSocketPrincipal(gameId);
-                attributes.put("principal", principal); // Spring will use this as Principal
+                attributes.put("principal", principal); // JwtHandshakeHandler এটাকে সেশনের Principal বানায়
                 attributes.put("user", userDetails);
                 attributes.put("gameId", gameId);
 
