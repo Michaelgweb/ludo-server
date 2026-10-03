@@ -115,7 +115,7 @@ public class WithdrawController {
         try {
             WithdrawRequest rejected = withdrawService.reject(withdrawId, txnId);
 
-            // Refund balance automatically handled in service if needed
+            // Refund balance automatically handled in service
 
             // Send Notification
             notificationService.sendNotification(
@@ -159,20 +159,26 @@ public class WithdrawController {
             return ResponseEntity.badRequest().body("Invalid amount format");
         }
 
+        // ০ বা ঋণাত্মক সংখ্যা দিয়ে ব্যালেন্স বাড়ানো আটকানো
+        if (amount.signum() <= 0) {
+            return ResponseEntity.badRequest().body("Amount must be greater than 0");
+        }
+
         String method = String.valueOf(requestData.get("method"));
         String receiverNumber = String.valueOf(requestData.get("receiverNumber"));
         String otp = String.valueOf(requestData.get("otp"));
 
-        if (user.getBalance().compareTo(amount) < 0) {
-            return ResponseEntity.badRequest().body("Insufficient balance");
+        // শুধু জেতা টাকা (withdraw ব্যালেন্স) তোলা যায়
+        if (user.getWithdrawBalance().compareTo(amount) < 0) {
+            return ResponseEntity.badRequest().body("Insufficient withdrawable balance");
         }
 
         if (!otpService.verifyWithdrawOtp(user.getMobile(), otp)) {
             return ResponseEntity.badRequest().body("Invalid or expired OTP");
         }
 
-        // Deduct balance
-        user.setBalance(user.getBalance().subtract(amount));
+        // Deduct withdraw balance
+        user.setWithdrawBalance(user.getWithdrawBalance().subtract(amount));
         userService.save(user);
 
         WithdrawRequest withdrawRequest = new WithdrawRequest();
@@ -195,7 +201,7 @@ public class WithdrawController {
             return ResponseEntity.ok(WithdrawRequestDto.fromEntity(created));
         } catch (Exception e) {
             // Rollback balance if failed
-            user.setBalance(user.getBalance().add(amount));
+            user.addToWithdrawBalance(amount);
             userService.save(user);
             return ResponseEntity.badRequest().body(e.getMessage());
         }
