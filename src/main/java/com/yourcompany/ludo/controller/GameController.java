@@ -1,50 +1,132 @@
 package com.yourcompany.ludo.controller;
 
-import com.yourcompany.ludo.model.GameSession;
-import com.yourcompany.ludo.model.User;
-import com.yourcompany.ludo.repository.GameSessionRepository;
+import com.yourcompany.ludo.service.GameFlowService;
+import com.yourcompany.ludo.service.GameFlowService.RollResult;
+import com.yourcompany.ludo.service.GameMoveService;
+import com.yourcompany.ludo.service.GameMoveService.MoveResult;
+import com.yourcompany.ludo.service.GamePayloads;
+import com.yourcompany.ludo.util.JwtUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
-/**
- * শুধু হিস্ট্রি। ম্যাচমেকিং এখন MatchController (/api/match/start),
- * রোল/কুইট DiceController, আর জয়/পরাজয়ের টাকা GameFlowService।
- */
 @RestController
-@RequestMapping("/game")
-public class GameController {
+@RequestMapping("/api/game")
+public class DiceController {
 
-    private final GameSessionRepository gameRepo;
+    private static final Logger log = LoggerFactory.getLogger(DiceController.class);
 
-    public GameController(GameSessionRepository gameRepo) {
-        this.gameRepo = gameRepo;
+    private final GameFlowService flow;
+    private final GameMoveService moves;
+    private final JwtUtil jwtUtil;
+    private final SimpMessagingTemplate messagingTemplate;
+
+    public DiceController(GameFlowService flow, GameMoveService moves,
+                          JwtUtil jwtUtil, SimpMessagingTemplate messagingTemplate) {
+        this.flow = flow;
+        this.moves = moves;
+        this.jwtUtil = jwtUtil;
+        this.messagingTemplate = messagingTemplate;
     }
 
-    /** নিজের ম্যাচ হিস্ট্রি (অন্যের userId দিয়ে দেখা যাবে না, পাসওয়ার্ড/ব্যালেন্স যাবে না) */
-    @GetMapping("/history")
-    public ResponseEntity<?> history(@AuthenticationPrincipal User user) {
-        List<GameSession> games = gameRepo.findByPlayer1OrPlayer2(user, user);
-        List<Map<String, Object>> out = games.stream().map(g -> {
-            Map<String, Object> m = new HashMap<>();
-            m.put("sessionId", g.getId());
-            m.put("status", g.getStatus());
-            m.put("entryFee", g.getEntryFee());
-            m.put("totalPot", g.getTotalPot());
-            m.put("startTime", g.getStartTime());
-            m.put("endTime", g.getEndTime());
-            m.put("player1GameId", g.getPlayer1() != null ? g.getPlayer1().getGameId() : null);
-            m.put("player2GameId", g.getPlayer2() != null ? g.getPlayer2().getGameId() : null);
-            m.put("winnerGameId", g.getWinner() != null ? g.getWinner().getGameId() : null);
-            m.put("won", g.getWinner() != null && g.getWinner().getId().equals(user.getId()));
-            return m;
-        }).toList();
-        return ResponseEntity.ok(out);
+    public record MoveRequest(int tokenIndex) {}
+
+    /** ডাইস রোল। প্রথম রোলে দুজনের ফি কাটে (GameFlowService এ) */
+    @PostMapping("/roll/{sessionId}")
+    public ResponseEntity<?> rollDice(@PathVariable Long sessionId,
+                                      @RequestHeader(value = "Authorization", required = false) String authHeader) {
+        try {
+            String gameId = gameIdFrom(authHeader);
+            RollResult r = flow.rollDice(sessionId, gameId);     // কমিট হয়ে ফিরে আসে
+
+            Map<String, Object> payload = GamePayloads.roll(sessionId, r);
+            if (!r.cancelled()) {
+                messagingTemplate.convertAndSend("/topic/game/" + sessionId, payload);
+            }
+            return ResponseEntity.ok(payload);
+
+        } catch (SecurityException e) {
+            return ResponseEntity.status(401).body(Map.of("error", "Missing Authorization header"));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            log.error("rollDice failed", e);
+            return ResponseEntity.status(500).body(Map.of("error", "সার্ভারে সমস্যা হয়েছে"));
+        }
+    }
+
+    /** টোকেন চাল। body: {"tokenIndex": 0..3}। যাচাই, কাটা ও জেতা সবই সার্ভারে */
+    @PostMapping("/move/{sessionId}")
+    public ResponseEntity<?> move(@PathVariable Long sessionId,
+                                  @RequestBody MoveRequest req,
+                                  @RequestHeader(value = "Authorization", required = false) String authHeader) {
+        try {
+            String gameId = gameIdFrom(authHeader);
+            MoveResult r = moves.move(sessionId, gameId, req.tokenIndex());
+
+            // নিজে চাল দিয়েছে: মিস রিসেট + পরের ১৫ সেকেন্ড শুরু
+            flow.markTurnStart(sessionId, gameId);
+
+            Map<String, Object> payload = GamePayloads.move(sessionId, r);
+            messagingTemplate.convertAndSend("/topic/game/" + sessionId, payload);
+            return ResponseEntity.ok(payload);
+
+        } catch (SecurityException e) {
+            return ResponseEntity.status(401).body(Map.of("error", "Missing Authorization header"));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            log.error("move failed", e);
+            return ResponseEntity.status(500).body(Map.of("error", "সার্ভারে সমস্যা হয়েছে"));
+        }
+    }
+
+    /** ম্যাচের বর্তমান অবস্থা (রিস্টার্ট/রিকানেক্টের পর টোকেন, পালা ও পেন্ডিং চাল ফেরত পেতে) */
+    @GetMapping("/state/{sessionId}")
+    public ResponseEntity<?> state(@PathVariable Long sessionId,
+                                   @RequestHeader(value = "Authorization", required = false) String authHeader) {
+        try {
+            String gameId = gameIdFrom(authHeader);
+            return ResponseEntity.ok(moves.state(sessionId, gameId));
+        } catch (SecurityException e) {
+            return ResponseEntity.status(401).body(Map.of("error", "Missing Authorization header"));
+        } catch (IllegalArgumentException e) {
+            if ("Session not found".equals(e.getMessage())) {
+                return ResponseEntity.status(404).body(Map.of("error", "Session not found"));
+            }
+            return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
+        } catch (Exception e) {
+            log.error("state failed", e);
+            return ResponseEntity.status(500).body(Map.of("error", "সার্ভারে সমস্যা হয়েছে"));
+        }
+    }
+
+    /** ইউজার নিজে ব্যাক/কুইট দিলে। নিয়ম GameFlowService.leave এ */
+    @PostMapping("/leave/{sessionId}")
+    public ResponseEntity<?> leave(@PathVariable Long sessionId,
+                                   @RequestHeader(value = "Authorization", required = false) String authHeader) {
+        try {
+            String gameId = gameIdFrom(authHeader);
+            flow.leave(sessionId, gameId);
+            return ResponseEntity.ok(Map.of("status", "LEFT"));
+        } catch (SecurityException e) {
+            return ResponseEntity.status(401).body(Map.of("error", "Missing Authorization header"));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            log.error("leave failed", e);
+            return ResponseEntity.status(500).body(Map.of("error", "সার্ভারে সমস্যা হয়েছে"));
+        }
+    }
+
+    private String gameIdFrom(String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            throw new SecurityException("Missing Authorization header");
+        }
+        return jwtUtil.getGameIdFromToken(authHeader.substring(7));
     }
 }
