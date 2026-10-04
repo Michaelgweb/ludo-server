@@ -11,6 +11,7 @@ import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -22,12 +23,16 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -37,8 +42,15 @@ import java.util.concurrent.ConcurrentHashMap;
 public class UserController {
 
     private static final Logger logger = LoggerFactory.getLogger(UserController.class);
-    private static final String AVATAR_UPLOAD_DIR = System.getProperty("user.dir") + File.separator + "avatars" + File.separator;
     private static final long PROFILE_REQUEST_INTERVAL_MILLIS = 1000;
+    private static final Set<String> ALLOWED_EXT = Set.of("jpg", "jpeg", "png", "webp");
+
+    /** WebConfig এর সাথে একই প্রপার্টি, তাই সেভ ও সার্ভ সবসময় একই ফোল্ডারে */
+    @Value("${file.upload-dir}")
+    private String uploadDir;
+
+    @Value("${file.upload-url-path:/avatars}")
+    private String uploadUrlPath;
 
     @Autowired
     private UserService userService;
@@ -96,6 +108,26 @@ public class UserController {
     private User reload(String gameId) {
         return userService.findByGameId(gameId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+    }
+
+    /** আপলোড ফোল্ডারের পুরো পাথ (না থাকলে তৈরি হয়) */
+    private Path avatarDir() throws IOException {
+        Path dir = Paths.get(uploadDir).toAbsolutePath().normalize();
+        Files.createDirectories(dir);
+        return dir;
+    }
+
+    /** আগের অবতার ফাইল মুছে ফেলা (ডিস্ক ভরে যাওয়া ঠেকাতে) */
+    private void deleteOldAvatarFile(String oldUrl) {
+        try {
+            String prefix = uploadUrlPath + "/";
+            if (oldUrl == null || !oldUrl.startsWith(prefix)) return;
+            // শুধু ফাইলের নাম নেওয়া হয়, যাতে "../" দিয়ে অন্য ফোল্ডারে যাওয়া না যায়
+            String name = Paths.get(oldUrl.substring(prefix.length())).getFileName().toString();
+            Files.deleteIfExists(avatarDir().resolve(name));
+        } catch (Exception e) {
+            logger.warn("Could not delete old avatar {}: {}", oldUrl, e.getMessage());
+        }
     }
 
     // ==================== Endpoints ====================
@@ -162,25 +194,33 @@ public class UserController {
                                           Authentication authentication) {
         if (file.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "Empty file"));
 
+        // শুধু ছবি: এক্সটেনশন ও কন্টেন্ট-টাইপ দুটোই যাচাই
+        String ext = StringUtils.getFilenameExtension(file.getOriginalFilename());
+        ext = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
+        String contentType = file.getContentType();
+        if (!ALLOWED_EXT.contains(ext) || contentType == null || !contentType.startsWith("image/")) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Only jpg, jpeg, png or webp images are allowed"));
+        }
+
         try {
             User user = getAuthenticatedUser(authentication);
-            File uploadDir = new File(AVATAR_UPLOAD_DIR);
-            if (!uploadDir.exists()) uploadDir.mkdirs();
+            String oldUrl = user.getAvatarUrl();
 
-            String ext = StringUtils.getFilenameExtension(file.getOriginalFilename());
-            if (ext == null) ext = "png";
+            Path dir = avatarDir();
             String filename = UUID.randomUUID() + "." + ext;
-            File savedFile = new File(uploadDir, filename);
-            file.transferTo(savedFile);
+            file.transferTo(dir.resolve(filename));
 
-            String avatarUrl = "/avatars/" + filename;
+            String avatarUrl = uploadUrlPath + "/" + filename;
             userService.updateAvatar(user.getGameId(), avatarUrl);
+
+            // নতুন ছবি সেভ হওয়ার পরেই পুরনোটা মোছা হয়
+            deleteOldAvatarFile(oldUrl);
 
             User updatedUser = reload(user.getGameId());
 
             broadcastUserUpdate(updatedUser);
             notificationService.sendNotification(updatedUser.getId(), "Avatar Updated", "Your avatar has been successfully updated.");
-            logger.info("Avatar uploaded for user {}", updatedUser.getGameId());
+            logger.info("Avatar uploaded for user {} -> {}", updatedUser.getGameId(), avatarUrl);
 
             return ResponseEntity.ok(Map.of("avatarUrl", avatarUrl));
         } catch (IOException e) {
@@ -192,7 +232,9 @@ public class UserController {
     @DeleteMapping("/avatar")
     public ResponseEntity<?> removeAvatar(Authentication authentication) {
         User user = getAuthenticatedUser(authentication);
+        String oldUrl = user.getAvatarUrl();
         userService.updateAvatar(user.getGameId(), null);
+        deleteOldAvatarFile(oldUrl);
 
         User updatedUser = reload(user.getGameId());
 
