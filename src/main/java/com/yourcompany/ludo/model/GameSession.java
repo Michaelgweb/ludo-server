@@ -70,6 +70,26 @@ public class GameSession {
     @Column(name = "pending_move", nullable = false, columnDefinition = "boolean default false")
     private boolean pendingMove = false;
 
+    // ---------------- ১৫ সেকেন্ড টাইমার / অটো-প্লে ----------------
+
+    /** পরপর কতবার সময় শেষ হয়েছে (৩ হলে হার)। নিজে খেললে ০ */
+    @Column(name = "p1_misses", nullable = false, columnDefinition = "int default 0")
+    private int player1Misses = 0;
+
+    @Column(name = "p2_misses", nullable = false, columnDefinition = "int default 0")
+    private int player2Misses = 0;
+
+    /** সব গুটি ঘরে থাকা অবস্থায় পরপর কতবার ৬ পড়েনি (৪-৫ রোলে ৬ দেওয়ার জন্য) */
+    @Column(name = "p1_no_six", nullable = false, columnDefinition = "int default 0")
+    private int player1NoSix = 0;
+
+    @Column(name = "p2_no_six", nullable = false, columnDefinition = "int default 0")
+    private int player2NoSix = 0;
+
+    /** বর্তমান রোল/চালের শেষ সময় (epoch millis, UTC) */
+    @Column(name = "turn_deadline")
+    private Long turnDeadline;
+
     @ElementCollection
     @CollectionTable(name = "player1_tokens", joinColumns = @JoinColumn(name = "game_session_id"))
     @OrderColumn(name = "token_index")
@@ -121,6 +141,23 @@ public class GameSession {
     public boolean isBothRolled() {
         return player1DiceCount >= 1 && player2DiceCount >= 1;
     }
+
+    // ---------------- Slot helpers (টাইমার / ডাইস লজিকের জন্য) ----------------
+
+    public int getMisses(int slot) { return slot == 1 ? player1Misses : player2Misses; }
+
+    public void setMisses(int slot, int v) {
+        if (slot == 1) player1Misses = v; else player2Misses = v;
+    }
+
+    public int getNoSix(int slot) { return slot == 1 ? player1NoSix : player2NoSix; }
+
+    public void setNoSix(int slot, int v) {
+        if (slot == 1) player1NoSix = v; else player2NoSix = v;
+    }
+
+    public Long getTurnDeadline() { return turnDeadline; }
+    public void setTurnDeadline(Long turnDeadline) { this.turnDeadline = turnDeadline; }
 
     // ---------------- Getters & Setters ----------------
     public Long getId() { return id; }
