@@ -4,6 +4,7 @@ import com.yourcompany.ludo.service.GameFlowService;
 import com.yourcompany.ludo.service.GameFlowService.RollResult;
 import com.yourcompany.ludo.service.GameMoveService;
 import com.yourcompany.ludo.service.GameMoveService.MoveResult;
+import com.yourcompany.ludo.service.GamePayloads;
 import com.yourcompany.ludo.util.JwtUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,7 +12,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -43,15 +43,7 @@ public class DiceController {
             String gameId = gameIdFrom(authHeader);
             RollResult r = flow.rollDice(sessionId, gameId);     // কমিট হয়ে ফিরে আসে
 
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("sessionId", sessionId);
-            payload.put("event", r.cancelled() ? "GAME_CANCELLED" : "DICE_ROLLED");
-            payload.put("dice", r.dice());
-            payload.put("rolledBy", r.player());
-            payload.put("nextPlayer", r.nextPlayer());
-            payload.put("canMove", r.canMove());                 // true হলে rolledBy কে /move কল করতে হবে
-            payload.put("message", r.message());
-
+            Map<String, Object> payload = GamePayloads.roll(sessionId, r);
             if (!r.cancelled()) {
                 messagingTemplate.convertAndSend("/topic/game/" + sessionId, payload);
             }
@@ -76,20 +68,10 @@ public class DiceController {
             String gameId = gameIdFrom(authHeader);
             MoveResult r = moves.move(sessionId, gameId, req.tokenIndex());
 
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("sessionId", sessionId);
-            payload.put("event", "TOKEN_MOVED");
-            payload.put("movedBy", r.player());
-            payload.put("token", r.token());
-            payload.put("from", r.from());
-            payload.put("to", r.to());
-            payload.put("captured", r.captured());
-            payload.put("nextPlayer", r.nextPlayer());
-            payload.put("finished", r.finished());
-            payload.put("winnerGameId", r.winnerGameId());
-            payload.put("player1Tokens", r.player1Tokens());
-            payload.put("player2Tokens", r.player2Tokens());
+            // নিজে চাল দিয়েছে: মিস রিসেট + পরের ১৫ সেকেন্ড শুরু
+            flow.markTurnStart(sessionId, gameId);
 
+            Map<String, Object> payload = GamePayloads.move(sessionId, r);
             messagingTemplate.convertAndSend("/topic/game/" + sessionId, payload);
             return ResponseEntity.ok(payload);
 
@@ -103,10 +85,7 @@ public class DiceController {
         }
     }
 
-    /**
-     * ম্যাচের বর্তমান অবস্থা। অ্যাপ রিস্টার্ট বা WebSocket রিকানেক্টের পর
-     * ক্লায়েন্ট এটা কল করে টোকেন, পালা ও পেন্ডিং চাল ফিরে পায়।
-     */
+    /** ম্যাচের বর্তমান অবস্থা (রিস্টার্ট/রিকানেক্টের পর টোকেন, পালা ও পেন্ডিং চাল ফেরত পেতে) */
     @GetMapping("/state/{sessionId}")
     public ResponseEntity<?> state(@PathVariable Long sessionId,
                                    @RequestHeader(value = "Authorization", required = false) String authHeader) {
@@ -126,10 +105,7 @@ public class DiceController {
         }
     }
 
-    /**
-     * ইউজার নিজে ব্যাক/কুইট দিলে এটা কল করবে। নিয়ম GameFlowService.leave এ:
-     * দুজন রোল করার আগে হলে বাতিল/রিফান্ড, পরে হলে সে হারবে।
-     */
+    /** ইউজার নিজে ব্যাক/কুইট দিলে। নিয়ম GameFlowService.leave এ */
     @PostMapping("/leave/{sessionId}")
     public ResponseEntity<?> leave(@PathVariable Long sessionId,
                                    @RequestHeader(value = "Authorization", required = false) String authHeader) {
@@ -153,4 +129,4 @@ public class DiceController {
         }
         return jwtUtil.getGameIdFromToken(authHeader.substring(7));
     }
-                }
+}
