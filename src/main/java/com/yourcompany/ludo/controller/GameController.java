@@ -16,16 +16,16 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/game")
-public class DiceController {
+public class GameController {
 
-    private static final Logger log = LoggerFactory.getLogger(DiceController.class);
+    private static final Logger log = LoggerFactory.getLogger(GameController.class);
 
     private final GameFlowService flow;
     private final GameMoveService moves;
     private final JwtUtil jwtUtil;
     private final SimpMessagingTemplate messagingTemplate;
 
-    public DiceController(GameFlowService flow, GameMoveService moves,
+    public GameController(GameFlowService flow, GameMoveService moves,
                           JwtUtil jwtUtil, SimpMessagingTemplate messagingTemplate) {
         this.flow = flow;
         this.moves = moves;
