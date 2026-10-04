@@ -133,6 +133,8 @@ public class SecurityConfig {
                 // ===== Authenticated =====
                 .requestMatchers("/api/user/profile/**").authenticated()
                 .requestMatchers("/api/deposit/**").authenticated()
+                // গেম: রোল, চাল, স্টেট, লিভ ও চ্যাট (/api/game/chat/**) সবই লগইন লাগবে
+                .requestMatchers("/api/game/**").authenticated()
 
                 // বাকি সব লগইন লাগবে
                 .anyRequest().authenticated()
