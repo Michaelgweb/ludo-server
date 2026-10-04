@@ -35,6 +35,11 @@ public class GameFlowService {
 
     private static final Logger log = LoggerFactory.getLogger(GameFlowService.class);
 
+    /** প্রতিটি রোল/চালের সময় */
+    public static final long TURN_MS = 15_000;
+    /** পরপর এতবার সময় শেষ হলে খেলোয়াড় হারবে */
+    public static final int MAX_MISSES = 3;
+
     private final GameSessionRepository sessions;
     private final WalletTransactionRepository wallet;
     private final SimpMessagingTemplate ws;
@@ -58,6 +63,13 @@ public class GameFlowService {
     public record RollResult(int dice, boolean cancelled, String message,
                              int player, int nextPlayer, boolean canMove) {}
 
+    /** টাইমার সময় শেষ হলে কী করতে হবে */
+    public enum Kind { NONE, ROLLED, NEED_MOVE, FORFEITED }
+
+    public record Expired(Kind kind, int actor, String gameId, int token, RollResult roll) {
+        static Expired none() { return new Expired(Kind.NONE, 0, null, -1, null); }
+    }
+
     // =====================================================================
     // 1) MATCH_FOUND -> ONGOING (Cleanup task কল করবে)
     // =====================================================================
@@ -70,6 +82,7 @@ public class GameFlowService {
 
         s.setStatus(GameStatus.ONGOING);
         if (s.getStartTime() == null) s.setStartTime(LocalDateTime.now());
+        s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);   // প্রথম রোলের ১৫ সেকেন্ড
 
         Map<String, Object> p = new HashMap<>();
         p.put("sessionId", s.getId());
@@ -80,7 +93,7 @@ public class GameFlowService {
     }
 
     // =====================================================================
-    // 2) ডাইস রোল। প্রথম রোলেই দুজনের ফি কাটে
+    // 2) ডাইস রোল (খেলোয়াড় নিজে ক্লিক করলে)। প্রথম রোলেই দুজনের ফি কাটে
     // =====================================================================
     @Transactional
     public RollResult rollDice(Long sid, String gameId) {
@@ -96,7 +109,12 @@ public class GameFlowService {
         if (s.isPendingMove()) {
             throw new IllegalStateException("Previous move pending");
         }
+        s.setMisses(me, 0);                                    // নিজে খেলেছে, মিস রিসেট
+        return doRoll(s, me);
+    }
 
+    /** রোলের মূল লজিক (ম্যানুয়াল ও অটো দুটোতেই একই) */
+    private RollResult doRoll(GameSession s, int me) {
         if (!s.isFeeDeducted()) {
             User[] ps = lockPlayers(s);                       // id অনুযায়ী লক, ডেডলক নেই
             BigDecimal fee = s.getEntryFee();
@@ -112,18 +130,20 @@ public class GameFlowService {
             s.setFirstRollAt(LocalDateTime.now());
         }
 
-        int dice = rnd.nextInt(6) + 1;                         // সার্ভারে র‍্যান্ডম
+        int[] mine = DicePicker.tokens(s, me);
+        boolean allYardBefore = DicePicker.allInYard(mine);
 
-        // পরপর তিনটি ৬ হলে তৃতীয়টি ১-৫ এ বদলে যায় (আপনার আগের নিয়ম)
-        if (dice == 6) {
-            s.setConsecutiveSixCount(s.getConsecutiveSixCount() + 1);
-            if (s.getConsecutiveSixCount() >= 3) {
-                dice = rnd.nextInt(5) + 1;
-                s.setConsecutiveSixCount(0);
-            }
-        } else {
-            s.setConsecutiveSixCount(0);
-        }
+        // পরপর তিনটি ৬ নয়: দুটো ৬ এর পর আর ৬ দেওয়া হয় না
+        boolean allowSix = s.getConsecutiveSixCount() < 2;
+
+        // ১) সব গুটি ঘরে থাকলে ৪-৫ রোলের মধ্যে ৬  ২) অসেফ ঘরে নিজের গুটি ডাবল হবে না
+        int dice = DicePicker.pick(rnd, me, mine, s.getNoSix(me), allowSix);
+
+        s.setConsecutiveSixCount(dice == 6 ? s.getConsecutiveSixCount() + 1 : 0);
+
+        // ঘরে আটকে থাকা অবস্থায় ৬ না পড়ার ধারা গোনা
+        if (allYardBefore) s.setNoSix(me, dice == 6 ? 0 : s.getNoSix(me) + 1);
+        else s.setNoSix(me, 0);
 
         if (me == 1) s.setPlayer1DiceCount(s.getPlayer1DiceCount() + 1);
         else s.setPlayer2DiceCount(s.getPlayer2DiceCount() + 1);
@@ -138,7 +158,62 @@ public class GameFlowService {
         int next = (dice == 6) ? me : (me == 1 ? 2 : 1);
         s.setCurrentPlayer(next);
 
+        // পরের অ্যাকশনের জন্য নতুন ১৫ সেকেন্ড (চাল বাকি থাকলে me, নইলে next)
+        s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);
+
         return new RollResult(dice, false, "OK", me, next, canMove);
+    }
+
+    // =====================================================================
+    // 2.5) ১৫ সেকেন্ডের টাইমার
+    // =====================================================================
+
+    /**
+     * টাইমার কল করে। সময় সত্যিই শেষ হলে মিস গোনে:
+     *  - ৩য় মিসে খেলোয়াড় হারে, প্রতিপক্ষ জেতে
+     *  - নইলে রোল বাকি থাকলে অটো রোল, চাল বাকি থাকলে অটো চালের গুটি বেছে দেয়
+     */
+    @Transactional
+    public Expired expireTurn(Long sid) {
+        GameSession s = lock(sid);
+        Long dl = s.getTurnDeadline();
+        if (s.getStatus() != GameStatus.ONGOING || dl == null
+                || dl > System.currentTimeMillis()) {
+            return Expired.none();                             // ইতিমধ্যে কেউ খেলে ফেলেছে
+        }
+
+        // রোল করা গুটি চালার দায়িত্ব diceOwner এর, নইলে currentPlayer এর
+        int actor = s.isPendingMove() ? s.getDiceOwner() : s.getCurrentPlayer();
+        String gid = (actor == 1 ? s.getPlayer1() : s.getPlayer2()).getGameId();
+
+        int misses = s.getMisses(actor) + 1;
+        s.setMisses(actor, misses);
+
+        if (misses >= MAX_MISSES) {
+            quit(s, actor, "৩ বার চাল মিস, প্রতিপক্ষ জিতেছে");
+            return new Expired(Kind.FORFEITED, actor, gid, -1, null);
+        }
+
+        if (s.isPendingMove()) {
+            s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);   // চাল ব্যর্থ হলেও লুপ নয়
+            int tok = DicePicker.autoToken(actor, DicePicker.tokens(s, actor), s.getLastDiceValue());
+            return new Expired(Kind.NEED_MOVE, actor, gid, tok, null);
+        }
+
+        RollResult r = doRoll(s, actor);
+        return new Expired(Kind.ROLLED, actor, gid, -1, r);
+    }
+
+    /**
+     * চাল শেষ হলে নতুন ১৫ সেকেন্ড শুরু।
+     * manualGameId দিলে ওই খেলোয়াড়ের মিস রিসেট (নিজে খেলেছে); null হলে অটো, রিসেট নয়।
+     */
+    @Transactional
+    public void markTurnStart(Long sid, String manualGameId) {
+        GameSession s = lock(sid);
+        if (s.getStatus() != GameStatus.ONGOING) return;
+        if (manualGameId != null) s.setMisses(s.slotOf(manualGameId), 0);
+        s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);
     }
 
     // =====================================================================
@@ -161,9 +236,11 @@ public class GameFlowService {
     public void leave(Long sid, String gameId) {
         GameSession s = lock(sid);
         if (s.getStatus() == GameStatus.FINISHED || s.getStatus() == GameStatus.CANCELLED) return;
+        quit(s, s.slotOf(gameId), "প্রতিপক্ষ বের হয়ে গেছে");
+    }
 
-        int leaver = s.slotOf(gameId);
-
+    /** leaver হারে। কেউ রোল না করলে বাতিল, একজন করলে রিফান্ড, দুজন করলে প্রতিপক্ষ জেতে */
+    private void quit(GameSession s, int leaver, String loseMsg) {
         if (!s.isFeeDeducted()) {                              // কেউ রোল করেনি, ফি কাটা হয়নি
             close(s, GameStatus.CANCELLED, "ম্যাচ বাতিল");
             return;
@@ -175,7 +252,7 @@ public class GameFlowService {
         }
         User winner = leaver == 1 ? s.getPlayer2() : s.getPlayer1();   // খেলার মাঝে বের হলে হার
         payWinner(s, winner);
-        close(s, GameStatus.FINISHED, "প্রতিপক্ষ বের হয়ে গেছে");
+        close(s, GameStatus.FINISHED, loseMsg);
     }
 
     // =====================================================================
@@ -239,6 +316,7 @@ public class GameFlowService {
     private void close(GameSession s, GameStatus st, String msg) {
         s.setStatus(st);
         s.setEndTime(LocalDateTime.now());
+        s.setTurnDeadline(null);                               // টাইমার বন্ধ
         Map<String, Object> p = new HashMap<>();
         p.put("sessionId", s.getId());
         p.put("status", st);
