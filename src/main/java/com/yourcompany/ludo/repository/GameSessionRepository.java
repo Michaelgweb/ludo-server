@@ -56,4 +56,11 @@ public interface GameSessionRepository extends JpaRepository<GameSession, Long> 
            "AND g.feeDeducted = false AND g.startTime < :cutoff")
     List<Long> findIdsIdleWithoutFee(@Param("statuses") Collection<GameStatus> statuses,
                                      @Param("cutoff") LocalDateTime cutoff);
+
+    // ---------------- ১৫ সেকেন্ড টার্ন টাইমার ----------------
+    /** ONGOING ম্যাচ যেখানে রোল/চালের সময় (turnDeadline) পার হয়ে গেছে */
+    @Query("SELECT g.id FROM GameSession g " +
+           "WHERE g.status = com.yourcompany.ludo.model.GameStatus.ONGOING " +
+           "AND g.turnDeadline IS NOT NULL AND g.turnDeadline < :now")
+    List<Long> findExpiredTurnIds(@Param("now") long now);
 }
