@@ -81,6 +81,9 @@ public class GameMoveService {
         }
         if (won) {
             flow.declareWinner(sid, gameId);
+        } else if (captured > 0 || to == LudoRules.HOME) {
+            // প্রতিপক্ষের গুটি কাটলে বা গুটি ৫৭ ঘরে উঠলে বোনাস রোল (পালা নিজের কাছেই থাকে)
+            s.setCurrentPlayer(me);
         }
 
         return new MoveResult(me, tokenIndex, from, to, captured, won,
