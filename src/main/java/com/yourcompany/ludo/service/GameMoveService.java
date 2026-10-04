@@ -109,6 +109,16 @@ public class GameMoveService {
         m.put("player1Tokens", new ArrayList<>(s.getPlayer1Tokens()));
         m.put("player2Tokens", new ArrayList<>(s.getPlayer2Tokens()));
         m.put("winnerGameId", s.getWinner() != null ? s.getWinner().getGameId() : null);
+
+        // মিস, অটো দান ও ১৫ সেকেন্ডের টাইমার (UI এর জন্য)
+        m.put("player1Misses", s.getMisses(1));
+        m.put("player2Misses", s.getMisses(2));
+        m.put("player1Auto", s.getAutoCount(1));
+        m.put("player2Auto", s.getAutoCount(2));
+        m.put("maxMisses", GameFlowService.MAX_MISSES);
+        m.put("bothRolled", s.isBothRolled());
+        m.put("turnDeadline", s.getTurnDeadline());
+
         m.put("serverTime", System.currentTimeMillis());
         return m;
     }
