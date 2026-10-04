@@ -79,6 +79,13 @@ public class GameSession {
     @Column(name = "p2_misses", nullable = false, columnDefinition = "int default 0")
     private int player2Misses = 0;
 
+    /** অটো খেলা দানের মোট সংখ্যা (UI তে দেখানোর জন্য, রিসেট হয় না) */
+    @Column(name = "p1_auto", nullable = false, columnDefinition = "int default 0")
+    private int player1Auto = 0;
+
+    @Column(name = "p2_auto", nullable = false, columnDefinition = "int default 0")
+    private int player2Auto = 0;
+
     /** সব গুটি ঘরে থাকা অবস্থায় পরপর কতবার ৬ পড়েনি (৪-৫ রোলে ৬ দেওয়ার জন্য) */
     @Column(name = "p1_no_six", nullable = false, columnDefinition = "int default 0")
     private int player1NoSix = 0;
@@ -148,6 +155,12 @@ public class GameSession {
 
     public void setMisses(int slot, int v) {
         if (slot == 1) player1Misses = v; else player2Misses = v;
+    }
+
+    public int getAutoCount(int slot) { return slot == 1 ? player1Auto : player2Auto; }
+
+    public void incAutoCount(int slot) {
+        if (slot == 1) player1Auto++; else player2Auto++;
     }
 
     public int getNoSix(int slot) { return slot == 1 ? player1NoSix : player2NoSix; }
