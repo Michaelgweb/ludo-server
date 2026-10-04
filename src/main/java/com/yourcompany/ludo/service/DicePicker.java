@@ -26,8 +26,8 @@ public final class DicePicker {
     // ⚠ একমাত্র জায়গা যেটা আপনার GameSession অনুযায়ী মিলিয়ে নিতে হবে
     // ---------------------------------------------------------------
     public static int[] tokens(GameSession s, int slot) {
-        return slot == 1 ? s.getPlayer1Tokens() : s.getPlayer2Tokens();
-        // List<Integer> হলে: .stream().mapToInt(Integer::intValue).toArray()
+        java.util.List<Integer> l = slot == 1 ? s.getPlayer1Tokens() : s.getPlayer2Tokens();
+        return l.stream().mapToInt(Integer::intValue).toArray();
     }
 
     /** গুটি p তে dice v দিলে কোথায় যাবে; অবৈধ হলে -1 */
