@@ -154,8 +154,17 @@ public class GameFlowService {
         boolean canMove = LudoRules.hasLegalMove(s, me, dice);
         s.setPendingMove(canMove);
 
-        // ৬ না হলে পালা বদল
-        int next = (dice == 6) ? me : (me == 1 ? 2 : 1);
+        int other = (me == 1 ? 2 : 1);
+        int next;
+        if (!canMove && dice == 6) {
+            // ৬ পড়েছে কিন্তু কোনো গুটি চলতে পারে না (যেমন হোম কলামে ২ লাগে):
+            // ৬ বাতিল, কিছু হবে না, বোনাস রোলও নেই, পালা প্রতিপক্ষের
+            next = other;
+            s.setConsecutiveSixCount(0);
+        } else {
+            // ৬ হলে আবার নিজের রোল, নইলে পালা বদল
+            next = (dice == 6) ? me : other;
+        }
         s.setCurrentPlayer(next);
 
         // পরের অ্যাকশনের জন্য নতুন ১৫ সেকেন্ড (চাল বাকি থাকলে me, নইলে next)
@@ -170,8 +179,9 @@ public class GameFlowService {
 
     /**
      * টাইমার কল করে। সময় সত্যিই শেষ হলে মিস গোনে:
+     *  - দুজন অন্তত একবার রোল না করা পর্যন্ত অটো/মিস চালু হয় না
      *  - ৩য় মিসে খেলোয়াড় হারে, প্রতিপক্ষ জেতে
-     *  - নইলে রোল বাকি থাকলে অটো রোল, চাল বাকি থাকলে অটো চালের গুটি বেছে দেয়
+     *  - নইলে রোল বাকি থাকলে অটো রোল, চাল বাকি থাকলে চলতে পারে এমন একটা গুটি বেছে দেয়
      */
     @Transactional
     public Expired expireTurn(Long sid) {
@@ -180,6 +190,11 @@ public class GameFlowService {
         if (s.getStatus() != GameStatus.ONGOING || dl == null
                 || dl > System.currentTimeMillis()) {
             return Expired.none();                             // ইতিমধ্যে কেউ খেলে ফেলেছে
+        }
+
+        // দুজনের প্রথম রোল না হওয়া পর্যন্ত অটো বন্ধ (প্রথম রোলের টাইমআউট আলাদা: timeoutFirstRoll)
+        if (!s.isBothRolled()) {
+            return Expired.none();
         }
 
         // রোল করা গুটি চালার দায়িত্ব diceOwner এর, নইলে currentPlayer এর
@@ -194,14 +209,36 @@ public class GameFlowService {
             return new Expired(Kind.FORFEITED, actor, gid, -1, null);
         }
 
+        s.incAutoCount(actor);                                 // অটো দান গোনা
+
         if (s.isPendingMove()) {
             s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);   // চাল ব্যর্থ হলেও লুপ নয়
-            int tok = DicePicker.autoToken(actor, DicePicker.tokens(s, actor), s.getLastDiceValue());
+            int tok = pickAutoToken(s, actor);
+            if (tok < 0) {                                     // নিরাপত্তা: চালার মতো গুটি নেই
+                s.setPendingMove(false);
+                s.setCurrentPlayer(actor == 1 ? 2 : 1);
+                return Expired.none();
+            }
             return new Expired(Kind.NEED_MOVE, actor, gid, tok, null);
         }
 
         RollResult r = doRoll(s, actor);
         return new Expired(Kind.ROLLED, actor, gid, -1, r);
+    }
+
+    /** অটো চালের গুটি: সার্ভারের নিয়মে যেটা সত্যিই চলতে পারে, তার মধ্যে সেরাটা */
+    private int pickAutoToken(GameSession s, int actor) {
+        int dice = s.getLastDiceValue();
+        List<Integer> toks = LudoRules.tokens(s, actor);
+
+        int best = DicePicker.autoToken(actor, DicePicker.tokens(s, actor), dice);
+        if (best >= 0 && LudoRules.target(toks.get(best), dice) != -1) {
+            return best;
+        }
+        for (int i = 0; i < toks.size(); i++) {                // যেকোনো চলার মতো গুটি
+            if (LudoRules.target(toks.get(i), dice) != -1) return i;
+        }
+        return -1;
     }
 
     /**
