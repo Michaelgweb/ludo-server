@@ -13,7 +13,8 @@ import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * প্রতি ১০ সেকেন্ডে চলে। ক্লাস @Transactional নয়; প্রতিটি সেশন আলাদাভাবে প্রসেস হয়।
+ * startReadyGames প্রতি ১ সেকেন্ডে, cancelIdleGames প্রতি ১০ সেকেন্ডে চলে।
+ * ক্লাস @Transactional নয়; প্রতিটি সেশন আলাদাভাবে প্রসেস হয়।
  * একাধিক সার্ভার চললেও নিরাপদ (Redis গেম-লক + DB স্ট্যাটাস চেক)।
  */
 @Component
@@ -31,13 +32,16 @@ public class GameCleanupTask {
         this.flow = flow;
     }
 
-    @Scheduled(fixedDelay = 10_000)
-    public void run() {
-        // ১) কাউন্টডাউন শেষ: MATCH_FOUND -> ONGOING
+    // কাউন্টডাউন শেষ: MATCH_FOUND -> ONGOING (দ্রুত চলে, যাতে প্রথম রোলে Game not active না আসে)
+    @Scheduled(fixedDelay = 1_000)
+    public void startReadyGames() {
         process(sessions.findIdsReadyToStart(GameStatus.MATCH_FOUND, System.currentTimeMillis()),
                 flow::startIfReady, "startIfReady");
+    }
 
-        // ২) কেউই রোল করেনি (ফি কাটা হয়নি): শুধু বাতিল
+    // কেউই রোল করেনি (ফি কাটা হয়নি): শুধু বাতিল
+    @Scheduled(fixedDelay = 10_000)
+    public void cancelIdleGames() {
         LocalDateTime idleCutoff = LocalDateTime.now().minusMinutes(IDLE_NO_ROLL_MINUTES);
         process(sessions.findIdsIdleWithoutFee(List.of(GameStatus.MATCH_FOUND, GameStatus.ONGOING), idleCutoff),
                 flow::cancelIdle, "cancelIdle");
