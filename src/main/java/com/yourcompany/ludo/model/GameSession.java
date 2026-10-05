@@ -4,24 +4,30 @@ import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 
 @Entity
+@Table(name = "game_session", indexes = {
+        @Index(name = "idx_gs_status_start", columnList = "status, match_start_timestamp"),
+        @Index(name = "idx_gs_status_fee_start", columnList = "status, fee_deducted, startTime"),
+        @Index(name = "idx_gs_p1_status", columnList = "player1_id, status"),
+        @Index(name = "idx_gs_p2_status", columnList = "player2_id, status")
+})
 public class GameSession {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // গেম শুরু ও টাকা লেনদেনে সরাসরি লাগে, তাই EAGER
     @ManyToOne(fetch = FetchType.EAGER)
     private User player1;
 
     @ManyToOne(fetch = FetchType.EAGER)
     private User player2;
 
-    @ManyToOne(fetch = FetchType.EAGER)
+    // শুধু গেম শেষে সেট হয়
+    @ManyToOne(fetch = FetchType.LAZY)
     private User winner;
 
     @Column(nullable = false, precision = 19, scale = 2)
@@ -37,84 +43,16 @@ public class GameSession {
     private LocalDateTime startTime;
     private LocalDateTime endTime;
 
-    // প্রথম ডাইস রোলের সময় (এই সময়েই দুজনের ফি কাটা হয়)
+    // প্রথম রোলের সময় (এই সময়েই দুজনের ফি কাটা হয়)
     @Column(name = "first_roll_at")
     private LocalDateTime firstRollAt;
 
-    // epoch millis (UTC)
+    // epoch millis (UTC), কাউন্টডাউন শেষের সময়
     @Column(name = "match_start_timestamp")
     private Long matchStartTimestamp;
 
-    @Column(name = "player1_dice_count", nullable = false)
-    private int player1DiceCount = 0;
-
-    @Column(name = "player2_dice_count", nullable = false)
-    private int player2DiceCount = 0;
-
     @Column(name = "fee_deducted", nullable = false)
     private boolean feeDeducted = false;
-
-    @Column(name = "current_player", nullable = false)
-    private int currentPlayer = 1;
-
-    @Column(name = "last_dice_value")
-    private Integer lastDiceValue = 0;
-
-    @Column(name = "dice_owner")
-    private Integer diceOwner;
-
-    @Column(name = "consecutive_six_count", nullable = false)
-    private int consecutiveSixCount = 0;
-
-    // রোলের পর টোকেন চাল বাকি থাকলে true
-    @Column(name = "pending_move", nullable = false, columnDefinition = "boolean default false")
-    private boolean pendingMove = false;
-
-    // ---------------- ১৫ সেকেন্ড টাইমার / অটো-প্লে ----------------
-
-    /** পরপর কতবার সময় শেষ হয়েছে (৩ হলে হার)। নিজে খেললে ০ */
-    @Column(name = "p1_misses", nullable = false, columnDefinition = "int default 0")
-    private int player1Misses = 0;
-
-    @Column(name = "p2_misses", nullable = false, columnDefinition = "int default 0")
-    private int player2Misses = 0;
-
-    /** অটো খেলা দানের মোট সংখ্যা (UI তে দেখানোর জন্য, রিসেট হয় না) */
-    @Column(name = "p1_auto", nullable = false, columnDefinition = "int default 0")
-    private int player1Auto = 0;
-
-    @Column(name = "p2_auto", nullable = false, columnDefinition = "int default 0")
-    private int player2Auto = 0;
-
-    /** সব গুটি ঘরে থাকা অবস্থায় পরপর কতবার ৬ পড়েনি (৪-৫ রোলে ৬ দেওয়ার জন্য) */
-    @Column(name = "p1_no_six", nullable = false, columnDefinition = "int default 0")
-    private int player1NoSix = 0;
-
-    @Column(name = "p2_no_six", nullable = false, columnDefinition = "int default 0")
-    private int player2NoSix = 0;
-
-    /** বর্তমান রোল/চালের শেষ সময় (epoch millis, UTC) */
-    @Column(name = "turn_deadline")
-    private Long turnDeadline;
-
-    @ElementCollection
-    @CollectionTable(name = "player1_tokens", joinColumns = @JoinColumn(name = "game_session_id"))
-    @OrderColumn(name = "token_index")
-    @Column(name = "token_position")
-    private List<Integer> player1Tokens = new ArrayList<>();
-
-    @ElementCollection
-    @CollectionTable(name = "player2_tokens", joinColumns = @JoinColumn(name = "game_session_id"))
-    @OrderColumn(name = "token_index")
-    @Column(name = "token_position")
-    private List<Integer> player2Tokens = new ArrayList<>();
-
-    public GameSession() {
-        for (int i = 0; i < 4; i++) {
-            player1Tokens.add(0);
-            player2Tokens.add(0);
-        }
-    }
 
     // ---------------- Business helpers ----------------
 
@@ -132,7 +70,7 @@ public class GameSession {
         }
     }
 
-    /** প্ল্যাটফর্ম কমিশন = দুজনের ফি - প্রাইজ (২৩ হলে ৪৬-৪০ = ৬) */
+    /** প্ল্যাটফর্ম কমিশন = দুজনের ফি - প্রাইজ */
     @Transient
     public BigDecimal getCommission() {
         return entryFee.multiply(BigDecimal.valueOf(2)).subtract(totalPot);
@@ -144,33 +82,6 @@ public class GameSession {
         if (player2 != null && player2.getGameId().equals(gameId)) return 2;
         throw new IllegalArgumentException("You are not a player of this game");
     }
-
-    public boolean isBothRolled() {
-        return player1DiceCount >= 1 && player2DiceCount >= 1;
-    }
-
-    // ---------------- Slot helpers (টাইমার / ডাইস লজিকের জন্য) ----------------
-
-    public int getMisses(int slot) { return slot == 1 ? player1Misses : player2Misses; }
-
-    public void setMisses(int slot, int v) {
-        if (slot == 1) player1Misses = v; else player2Misses = v;
-    }
-
-    public int getAutoCount(int slot) { return slot == 1 ? player1Auto : player2Auto; }
-
-    public void incAutoCount(int slot) {
-        if (slot == 1) player1Auto++; else player2Auto++;
-    }
-
-    public int getNoSix(int slot) { return slot == 1 ? player1NoSix : player2NoSix; }
-
-    public void setNoSix(int slot, int v) {
-        if (slot == 1) player1NoSix = v; else player2NoSix = v;
-    }
-
-    public Long getTurnDeadline() { return turnDeadline; }
-    public void setTurnDeadline(Long turnDeadline) { this.turnDeadline = turnDeadline; }
 
     // ---------------- Getters & Setters ----------------
     public Long getId() { return id; }
@@ -205,35 +116,8 @@ public class GameSession {
     public Long getMatchStartTimestamp() { return matchStartTimestamp; }
     public void setMatchStartTimestamp(Long epochMillis) { this.matchStartTimestamp = epochMillis; }
 
-    public int getPlayer1DiceCount() { return player1DiceCount; }
-    public void setPlayer1DiceCount(int v) { this.player1DiceCount = v; }
-
-    public int getPlayer2DiceCount() { return player2DiceCount; }
-    public void setPlayer2DiceCount(int v) { this.player2DiceCount = v; }
-
     public boolean isFeeDeducted() { return feeDeducted; }
     public void setFeeDeducted(boolean feeDeducted) { this.feeDeducted = feeDeducted; }
-
-    public int getCurrentPlayer() { return currentPlayer; }
-    public void setCurrentPlayer(int currentPlayer) { this.currentPlayer = currentPlayer; }
-
-    public Integer getLastDiceValue() { return lastDiceValue; }
-    public void setLastDiceValue(Integer lastDiceValue) { this.lastDiceValue = lastDiceValue; }
-
-    public Integer getDiceOwner() { return diceOwner; }
-    public void setDiceOwner(Integer diceOwner) { this.diceOwner = diceOwner; }
-
-    public int getConsecutiveSixCount() { return consecutiveSixCount; }
-    public void setConsecutiveSixCount(int v) { this.consecutiveSixCount = v; }
-
-    public boolean isPendingMove() { return pendingMove; }
-    public void setPendingMove(boolean pendingMove) { this.pendingMove = pendingMove; }
-
-    public List<Integer> getPlayer1Tokens() { return player1Tokens; }
-    public void setPlayer1Tokens(List<Integer> t) { this.player1Tokens = t; }
-
-    public List<Integer> getPlayer2Tokens() { return player2Tokens; }
-    public void setPlayer2Tokens(List<Integer> t) { this.player2Tokens = t; }
 
     @Override
     public boolean equals(Object o) {
@@ -248,6 +132,6 @@ public class GameSession {
     @Override
     public String toString() {
         return "GameSession{id=" + id + ", status=" + status + ", entryFee=" + entryFee
-                + ", totalPot=" + totalPot + ", currentPlayer=" + currentPlayer + "}";
+                + ", totalPot=" + totalPot + "}";
     }
 }
