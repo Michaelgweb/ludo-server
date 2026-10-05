@@ -66,65 +66,30 @@
       <scope>runtime</scope>
     </dependency>
 
-    <!-- JAXB -->
-    <dependency>
-      <groupId>jakarta.xml.bind</groupId>
-      <artifactId>jakarta.xml.bind-api</artifactId>
-      <version>3.0.1</version>
-    </dependency>
-    <dependency>
-      <groupId>org.glassfish.jaxb</groupId>
-      <artifactId>jaxb-runtime</artifactId>
-      <version>3.0.2</version>
-    </dependency>
-
-    <!-- Swagger -->
+    <!-- Swagger (প্রোডাকশনে দরকার না হলে এটাও মুছে দিতে পারো) -->
     <dependency>
       <groupId>org.springdoc</groupId>
       <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
       <version>2.2.0</version>
     </dependency>
 
-    <!-- Bean Validation (Hibernate Validator ও এর ভেতরেই আছে) -->
+    <!-- Bean Validation -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
 
-    <!-- WebSocket (spring-messaging ও এর ভেতরেই আছে) -->
+    <!-- WebSocket (STOMP) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-websocket</artifactId>
     </dependency>
 
-    <!-- Dev Tools: শুধু লোকাল, প্রোডাকশন jar এ যায় না -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-devtools</artifactId>
-      <scope>runtime</scope>
-      <optional>true</optional>
-    </dependency>
-
-    <!-- Lombok -->
+    <!-- Lombok (কোনো ক্লাসে @Data/@Getter ইত্যাদি না থাকলে এটাও মুছে দিতে পারো) -->
     <dependency>
       <groupId>org.projectlombok</groupId>
       <artifactId>lombok</artifactId>
-      <version>1.18.30</version>
       <scope>provided</scope>
-    </dependency>
-
-    <!-- File Upload Support -->
-    <dependency>
-      <groupId>commons-fileupload</groupId>
-      <artifactId>commons-fileupload</artifactId>
-      <version>1.5</version>
-    </dependency>
-
-    <!-- jakarta.annotation-api -->
-    <dependency>
-      <groupId>jakarta.annotation</groupId>
-      <artifactId>jakarta.annotation-api</artifactId>
-      <version>2.1.0</version>
     </dependency>
   </dependencies>
 
