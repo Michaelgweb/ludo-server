@@ -10,7 +10,7 @@
   <packaging>jar</packaging>
 
   <name>ludo-server</name>
-  <description>Ludo server: JWT Auth, PostgreSQL, WebSocket</description>
+  <description>Ludo server: JWT Auth, PostgreSQL, Redis, WebSocket</description>
 
   <parent>
     <groupId>org.springframework.boot</groupId>
@@ -24,7 +24,7 @@
   </properties>
 
   <dependencies>
-    <!-- Web (Jackson ও এর ভেতরেই আছে) -->
+    <!-- Web (Jackson এর ভেতরেই আছে) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
@@ -38,6 +38,12 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!-- Redis: চলমান গেমের স্টেট, টাইমার ও লক -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
     </dependency>
 
     <!-- PostgreSQL Driver -->
@@ -66,7 +72,7 @@
       <scope>runtime</scope>
     </dependency>
 
-    <!-- Swagger (প্রোডাকশনে দরকার না হলে এটাও মুছে দিতে পারো) -->
+    <!-- Swagger (প্রোডাকশনে দরকার না হলে মুছে দিন) -->
     <dependency>
       <groupId>org.springdoc</groupId>
       <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
@@ -85,7 +91,7 @@
       <artifactId>spring-boot-starter-websocket</artifactId>
     </dependency>
 
-    <!-- Lombok (কোনো ক্লাসে @Data/@Getter ইত্যাদি না থাকলে এটাও মুছে দিতে পারো) -->
+    <!-- Lombok (কোনো ক্লাসে ব্যবহার না হলে মুছে দিন) -->
     <dependency>
       <groupId>org.projectlombok</groupId>
       <artifactId>lombok</artifactId>
