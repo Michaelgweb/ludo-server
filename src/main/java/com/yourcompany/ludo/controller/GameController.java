@@ -41,7 +41,7 @@ public class GameController {
                                       @RequestHeader(value = "Authorization", required = false) String authHeader) {
         try {
             String gameId = gameIdFrom(authHeader);
-            RollResult r = flow.rollDice(sessionId, gameId);     // কমিট হয়ে ফিরে আসে
+            RollResult r = flow.rollDice(sessionId, gameId);
 
             Map<String, Object> payload = GamePayloads.roll(sessionId, r);
             if (!r.cancelled()) {
@@ -66,10 +66,8 @@ public class GameController {
                                   @RequestHeader(value = "Authorization", required = false) String authHeader) {
         try {
             String gameId = gameIdFrom(authHeader);
-            MoveResult r = moves.move(sessionId, gameId, req.tokenIndex());
-
-            // নিজে চাল দিয়েছে: মিস রিসেট + পরের ১৫ সেকেন্ড শুরু
-            flow.markTurnStart(sessionId, gameId);
+            // manual = true: মিস রিসেট ও নতুন ১৫ সেকেন্ড ভেতরেই বসে যায়
+            MoveResult r = moves.move(sessionId, gameId, req.tokenIndex(), true);
 
             Map<String, Object> payload = GamePayloads.move(sessionId, r);
             messagingTemplate.convertAndSend("/topic/game/" + sessionId, payload);
