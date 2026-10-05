@@ -1,69 +1,37 @@
 package com.yourcompany.ludo.service;
 
-import com.yourcompany.ludo.model.GameSession;
-import com.yourcompany.ludo.model.GameStatus;
-import com.yourcompany.ludo.model.User;
-import com.yourcompany.ludo.model.WalletTransaction;
-import com.yourcompany.ludo.model.WalletTransaction.TxType;
 import com.yourcompany.ludo.repository.GameSessionRepository;
-import com.yourcompany.ludo.repository.WalletTransactionRepository;
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.LockModeType;
-import jakarta.persistence.PersistenceContext;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.math.BigDecimal;
 import java.security.SecureRandom;
-import java.time.LocalDateTime;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 
 /**
- * গেমের সব টাকা-সংক্রান্ত কাজ একই জায়গায়। প্রতিটি মেথড আগে সেশন রো লক করে,
- * তাই একই ম্যাচের উপর দুটো কাজ একসাথে চলতে পারে না।
+ * গেমের প্রবাহ: রোল, টাইমার, বের হওয়া। চলমান স্টেট Redis-এ, টাকার কাজ GameMoneyService-এ (DB)।
+ * প্রতিটি মেথড গেম-লকের ভেতরে চলে, তাই একই গেমে দুটো কাজ একসাথে হয় না।
  */
 @Service
 public class GameFlowService {
 
-    private static final Logger log = LoggerFactory.getLogger(GameFlowService.class);
-
-    /** প্রতিটি রোল/চালের সময় */
     public static final long TURN_MS = 15_000;
-    /** পরপর এতবার সময় শেষ হলে খেলোয়াড় হারবে */
     public static final int MAX_MISSES = 3;
+    /** ফি কাটার পর অপর জন এর মধ্যে প্রথম রোল না করলে বাতিল + রিফান্ড */
+    public static final long FIRST_ROLL_TIMEOUT_MS = 60_000;
 
-    private final GameSessionRepository sessions;
-    private final WalletTransactionRepository wallet;
-    private final SimpMessagingTemplate ws;
+    private final GameStateStore store;
+    private final GameLock lock;
+    private final GameMoneyService money;
     private final SecureRandom rnd = new SecureRandom();
 
-    @PersistenceContext
-    private EntityManager em;
-
-    public GameFlowService(GameSessionRepository sessions,
-                           WalletTransactionRepository wallet,
-                           SimpMessagingTemplate ws) {
-        this.sessions = sessions;
-        this.wallet = wallet;
-        this.ws = ws;
+    public GameFlowService(GameStateStore store, GameLock lock, GameMoneyService money,
+                           GameSessionRepository unused) {
+        this.store = store;
+        this.lock = lock;
+        this.money = money;
     }
 
-    /**
-     * player = যে রোল করেছে (১/২), nextPlayer = চাল শেষে কার রোল,
-     * canMove = true হলে player কে এখন /move কল করতে হবে
-     */
     public record RollResult(int dice, boolean cancelled, String message,
                              int player, int nextPlayer, boolean canMove) {}
 
-    /** টাইমার সময় শেষ হলে কী করতে হবে */
     public enum Kind { NONE, ROLLED, NEED_MOVE, FORFEITED }
 
     public record Expired(Kind kind, int actor, String gameId, int token, RollResult roll) {
@@ -71,311 +39,171 @@ public class GameFlowService {
     }
 
     // =====================================================================
-    // 1) MATCH_FOUND -> ONGOING (Cleanup task কল করবে)
+    // 1) MATCH_FOUND -> ONGOING (GameCleanupTask কল করে)
     // =====================================================================
-    @Transactional
     public void startIfReady(Long sid) {
-        GameSession s = lock(sid);
-        if (s.getStatus() != GameStatus.MATCH_FOUND) return;
-        if (s.getMatchStartTimestamp() == null
-                || s.getMatchStartTimestamp() > System.currentTimeMillis()) return;
-
-        s.setStatus(GameStatus.ONGOING);
-        if (s.getStartTime() == null) s.setStartTime(LocalDateTime.now());
-        s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);   // প্রথম রোলের ১৫ সেকেন্ড
-
-        Map<String, Object> p = new HashMap<>();
-        p.put("sessionId", s.getId());
-        p.put("event", "GAME_STARTED");
-        p.put("status", GameStatus.ONGOING);
-        p.put("startingPlayerGameId", s.getPlayer1().getGameId());
-        notifyBoth(s, p);
+        lock.with(sid, () -> {
+            String[] ids = money.markOngoing(sid);
+            if (ids == null) return null;
+            GameState s = new GameState();
+            s.id = sid;
+            s.g1 = ids[0];
+            s.g2 = ids[1];
+            s.deadline = System.currentTimeMillis() + TURN_MS;
+            store.save(s);
+            return null;
+        });
     }
 
     // =====================================================================
-    // 2) ডাইস রোল (খেলোয়াড় নিজে ক্লিক করলে)। প্রথম রোলেই দুজনের ফি কাটে
+    // 2) ডাইস রোল। প্রথম রোলে দুজনের ফি কাটে
     // =====================================================================
-    @Transactional
     public RollResult rollDice(Long sid, String gameId) {
-        GameSession s = lock(sid);
-        if (s.getStatus() != GameStatus.ONGOING) {
-            throw new IllegalStateException("Game not active");
-        }
-        int me = s.slotOf(gameId);
-        if (s.getCurrentPlayer() != me) {
-            throw new IllegalStateException("Not your turn");
-        }
-        // আগের রোলের টোকেন চাল বাকি থাকলে নতুন রোল নয়
-        if (s.isPendingMove()) {
-            throw new IllegalStateException("Previous move pending");
-        }
-        s.setMisses(me, 0);                                    // নিজে খেলেছে, মিস রিসেট
-        return doRoll(s, me);
+        return lock.with(sid, () -> {
+            GameState s = store.load(sid);
+            if (s == null) throw new IllegalStateException("Game not active");
+            int me = s.slotOf(gameId);
+            if (s.currentPlayer != me) throw new IllegalStateException("Not your turn");
+            if (s.pendingMove) throw new IllegalStateException("Previous move pending");
+            s.misses[me] = 0;
+            RollResult r = doRoll(s, me);
+            if (!r.cancelled()) store.save(s);
+            return r;
+        });
     }
 
-    /** রোলের মূল লজিক (ম্যানুয়াল ও অটো দুটোতেই একই) */
-    private RollResult doRoll(GameSession s, int me) {
-        if (!s.isFeeDeducted()) {
-            User[] ps = lockPlayers(s);                       // id অনুযায়ী লক, ডেডলক নেই
-            BigDecimal fee = s.getEntryFee();
-            if (ps[0].getBalance().compareTo(fee) < 0 || ps[1].getBalance().compareTo(fee) < 0) {
-                close(s, GameStatus.CANCELLED, "ব্যালেন্স অপর্যাপ্ত, ম্যাচ বাতিল");
-                return new RollResult(0, true, "Insufficient balance", me, s.getCurrentPlayer(), false);
+    /** রোলের মূল লজিক (ম্যানুয়াল ও অটো দুটোতেই একই)। লকের ভেতরে ডাকতে হবে */
+    private RollResult doRoll(GameState s, int me) {
+        if (!s.feeDeducted) {
+            if (!money.chargeEntryFee(s.id)) {              // DB: ব্যালেন্স কম, বাতিল হয়েছে
+                store.delete(s.id);
+                return new RollResult(0, true, "Insufficient balance", me, s.currentPlayer, false);
             }
-            for (User u : ps) {
-                u.deduct(fee);
-                logTx(u, s, TxType.ENTRY_FEE, fee.negate());
-            }
-            s.setFeeDeducted(true);
-            s.setFirstRollAt(LocalDateTime.now());
+            s.feeDeducted = true;
+            s.firstRollAt = System.currentTimeMillis();
         }
 
-        int[] mine = DicePicker.tokens(s, me);
+        int[] mine = s.tokens(me);
         boolean allYardBefore = DicePicker.allInYard(mine);
+        boolean allowSix = s.sixCount < 2;                   // পরপর তিনটি ৬ নয়
 
-        // পরপর তিনটি ৬ নয়: দুটো ৬ এর পর আর ৬ দেওয়া হয় না
-        boolean allowSix = s.getConsecutiveSixCount() < 2;
+        int dice = DicePicker.pick(rnd, me, mine, s.noSix[me], allowSix);
 
-        // ১) সব গুটি ঘরে থাকলে ৪-৫ রোলের মধ্যে ৬  ২) অসেফ ঘরে নিজের গুটি ডাবল হবে না
-        int dice = DicePicker.pick(rnd, me, mine, s.getNoSix(me), allowSix);
+        s.sixCount = dice == 6 ? s.sixCount + 1 : 0;
+        s.noSix[me] = allYardBefore ? (dice == 6 ? 0 : s.noSix[me] + 1) : 0;
+        s.diceCount[me]++;
+        s.lastDice = dice;
+        s.diceOwner = me;
 
-        s.setConsecutiveSixCount(dice == 6 ? s.getConsecutiveSixCount() + 1 : 0);
+        boolean canMove = LudoRules.hasLegalMove(mine, dice);
+        s.pendingMove = canMove;
 
-        // ঘরে আটকে থাকা অবস্থায় ৬ না পড়ার ধারা গোনা
-        if (allYardBefore) s.setNoSix(me, dice == 6 ? 0 : s.getNoSix(me) + 1);
-        else s.setNoSix(me, 0);
-
-        if (me == 1) s.setPlayer1DiceCount(s.getPlayer1DiceCount() + 1);
-        else s.setPlayer2DiceCount(s.getPlayer2DiceCount() + 1);
-        s.setLastDiceValue(dice);
-        s.setDiceOwner(me);
-
-        // বৈধ চাল থাকলে খেলোয়াড়কে /move কল করতে হবে, না থাকলে পালা নিজে থেকেই যাবে
-        boolean canMove = LudoRules.hasLegalMove(s, me, dice);
-        s.setPendingMove(canMove);
-
-        int other = (me == 1 ? 2 : 1);
+        int other = me == 1 ? 2 : 1;
         int next;
         if (!canMove && dice == 6) {
-            // ৬ পড়েছে কিন্তু কোনো গুটি চলতে পারে না (যেমন হোম কলামে ২ লাগে):
-            // ৬ বাতিল, কিছু হবে না, বোনাস রোলও নেই, পালা প্রতিপক্ষের
-            next = other;
-            s.setConsecutiveSixCount(0);
+            next = other;                                    // ৬ বাতিল, বোনাস রোল নেই
+            s.sixCount = 0;
         } else {
-            // ৬ হলে আবার নিজের রোল, নইলে পালা বদল
-            next = (dice == 6) ? me : other;
+            next = dice == 6 ? me : other;
         }
-        s.setCurrentPlayer(next);
-
-        // পরের অ্যাকশনের জন্য নতুন ১৫ সেকেন্ড (চাল বাকি থাকলে me, নইলে next)
-        s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);
+        s.currentPlayer = next;
+        s.deadline = System.currentTimeMillis() + TURN_MS;
 
         return new RollResult(dice, false, "OK", me, next, canMove);
     }
 
     // =====================================================================
-    // 2.5) ১৫ সেকেন্ডের টাইমার
+    // 3) ১৫ সেকেন্ডের টাইমার (TurnTicker কল করে)
     // =====================================================================
-
-    /**
-     * টাইমার কল করে। সময় সত্যিই শেষ হলে মিস গোনে:
-     *  - দুজন অন্তত একবার রোল না করা পর্যন্ত অটো/মিস চালু হয় না
-     *  - ৩য় মিসে খেলোয়াড় হারে, প্রতিপক্ষ জেতে
-     *  - নইলে রোল বাকি থাকলে অটো রোল, চাল বাকি থাকলে চলতে পারে এমন একটা গুটি বেছে দেয়
-     */
-    @Transactional
     public Expired expireTurn(Long sid) {
-        GameSession s = lock(sid);
-        Long dl = s.getTurnDeadline();
-        if (s.getStatus() != GameStatus.ONGOING || dl == null
-                || dl > System.currentTimeMillis()) {
-            return Expired.none();                             // ইতিমধ্যে কেউ খেলে ফেলেছে
-        }
+        return lock.with(sid, () -> {
+            GameState s = store.load(sid);
+            if (s == null) return Expired.none();
 
-        // দুজনের প্রথম রোল না হওয়া পর্যন্ত অটো বন্ধ (প্রথম রোলের টাইমআউট আলাদা: timeoutFirstRoll)
-        if (!s.isBothRolled()) {
-            return Expired.none();
-        }
-
-        // রোল করা গুটি চালার দায়িত্ব diceOwner এর, নইলে currentPlayer এর
-        int actor = s.isPendingMove() ? s.getDiceOwner() : s.getCurrentPlayer();
-        String gid = (actor == 1 ? s.getPlayer1() : s.getPlayer2()).getGameId();
-
-        int misses = s.getMisses(actor) + 1;
-        s.setMisses(actor, misses);
-
-        if (misses >= MAX_MISSES) {
-            quit(s, actor, "৩ বার চাল মিস, প্রতিপক্ষ জিতেছে");
-            return new Expired(Kind.FORFEITED, actor, gid, -1, null);
-        }
-
-        s.incAutoCount(actor);                                 // অটো দান গোনা
-
-        if (s.isPendingMove()) {
-            s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);   // চাল ব্যর্থ হলেও লুপ নয়
-            int tok = pickAutoToken(s, actor);
-            if (tok < 0) {                                     // নিরাপত্তা: চালার মতো গুটি নেই
-                s.setPendingMove(false);
-                s.setCurrentPlayer(actor == 1 ? 2 : 1);
+            long now = System.currentTimeMillis();
+            if (s.deadline == 0 || s.deadline > now) {       // কেউ ইতিমধ্যে খেলেছে
+                store.save(s);                               // ticker মুছে ফেলেছিল, টাইমার আবার বসাও
                 return Expired.none();
             }
-            return new Expired(Kind.NEED_MOVE, actor, gid, tok, null);
-        }
 
-        RollResult r = doRoll(s, actor);
-        return new Expired(Kind.ROLLED, actor, gid, -1, r);
-    }
+            // দুজন রোল না করা পর্যন্ত অটো বন্ধ
+            if (!s.bothRolled()) {
+                if (s.feeDeducted && now - s.firstRollAt > FIRST_ROLL_TIMEOUT_MS) {
+                    money.refundAndCancel(sid, "প্রতিপক্ষ রোল না করায় ম্যাচ বাতিল, ফি ফেরত");
+                    store.delete(sid);
+                    return Expired.none();
+                }
+                s.deadline = now + TURN_MS;
+                store.save(s);
+                return Expired.none();
+            }
 
-    /** অটো চালের গুটি: সার্ভারের নিয়মে যেটা সত্যিই চলতে পারে, তার মধ্যে সেরাটা */
-    private int pickAutoToken(GameSession s, int actor) {
-        int dice = s.getLastDiceValue();
-        List<Integer> toks = LudoRules.tokens(s, actor);
+            int actor = s.pendingMove ? s.diceOwner : s.currentPlayer;
+            String gid = actor == 1 ? s.g1 : s.g2;
 
-        int best = DicePicker.autoToken(actor, DicePicker.tokens(s, actor), dice);
-        if (best >= 0 && LudoRules.target(toks.get(best), dice) != -1) {
-            return best;
-        }
-        for (int i = 0; i < toks.size(); i++) {                // যেকোনো চলার মতো গুটি
-            if (LudoRules.target(toks.get(i), dice) != -1) return i;
-        }
-        return -1;
-    }
+            s.misses[actor]++;
+            if (s.misses[actor] >= MAX_MISSES) {
+                quit(s, actor, "৩ বার চাল মিস, প্রতিপক্ষ জিতেছে");
+                return new Expired(Kind.FORFEITED, actor, gid, -1, null);
+            }
+            s.auto[actor]++;
 
-    /**
-     * চাল শেষ হলে নতুন ১৫ সেকেন্ড শুরু।
-     * manualGameId দিলে ওই খেলোয়াড়ের মিস রিসেট (নিজে খেলেছে); null হলে অটো, রিসেট নয়।
-     */
-    @Transactional
-    public void markTurnStart(Long sid, String manualGameId) {
-        GameSession s = lock(sid);
-        if (s.getStatus() != GameStatus.ONGOING) return;
-        if (manualGameId != null) s.setMisses(s.slotOf(manualGameId), 0);
-        s.setTurnDeadline(System.currentTimeMillis() + TURN_MS);
-    }
+            if (s.pendingMove) {
+                s.deadline = now + TURN_MS;                  // চাল ব্যর্থ হলেও লুপ নয়
+                int tok = DicePicker.autoToken(actor, s.tokens(actor), s.lastDice);
+                if (tok < 0 || LudoRules.target(s.tokens(actor)[tok], s.lastDice) == -1) {
+                    s.pendingMove = false;                   // নিরাপত্তা: চালার মতো গুটি নেই
+                    s.currentPlayer = actor == 1 ? 2 : 1;
+                    store.save(s);
+                    return Expired.none();
+                }
+                store.save(s);
+                return new Expired(Kind.NEED_MOVE, actor, gid, tok, null);
+            }
 
-    // =====================================================================
-    // 3) স্বাভাবিকভাবে কেউ জিতলে (GameMoveService থেকে কল হয়)
-    // =====================================================================
-    @Transactional
-    public void declareWinner(Long sid, String winnerGameId) {
-        GameSession s = lock(sid);
-        if (s.getStatus() != GameStatus.ONGOING) return;       // ডাবল পেমেন্ট বন্ধ
-        if (!s.isFeeDeducted()) throw new IllegalStateException("Fee not deducted");
-        User winner = s.slotOf(winnerGameId) == 1 ? s.getPlayer1() : s.getPlayer2();
-        payWinner(s, winner);
-        close(s, GameStatus.FINISHED, "ম্যাচ শেষ");
+            RollResult r = doRoll(s, actor);
+            if (!r.cancelled()) store.save(s);
+            return new Expired(Kind.ROLLED, actor, gid, -1, r);
+        });
     }
 
     // =====================================================================
-    // 4) বাক / ডিসকানেক্ট (রিকানেক্ট সময় শেষে কল করুন)
+    // 4) বাক / ডিসকানেক্ট
     // =====================================================================
-    @Transactional
     public void leave(Long sid, String gameId) {
-        GameSession s = lock(sid);
-        if (s.getStatus() == GameStatus.FINISHED || s.getStatus() == GameStatus.CANCELLED) return;
-        quit(s, s.slotOf(gameId), "প্রতিপক্ষ বের হয়ে গেছে");
+        lock.with(sid, () -> {
+            GameState s = store.load(sid);
+            if (s == null) {
+                // গেম এখনো শুরু হয়নি (MATCH_FOUND) বা শেষ। ফি না কাটা থাকলে শুধু বাতিল
+                money.cancelIfIdle(sid, gameId, "ম্যাচ বাতিল");
+                return null;
+            }
+            quit(s, s.slotOf(gameId), "প্রতিপক্ষ বের হয়ে গেছে");
+            return null;
+        });
     }
 
     /** leaver হারে। কেউ রোল না করলে বাতিল, একজন করলে রিফান্ড, দুজন করলে প্রতিপক্ষ জেতে */
-    private void quit(GameSession s, int leaver, String loseMsg) {
-        if (!s.isFeeDeducted()) {                              // কেউ রোল করেনি, ফি কাটা হয়নি
-            close(s, GameStatus.CANCELLED, "ম্যাচ বাতিল");
-            return;
-        }
-        if (!s.isBothRolled()) {                               // একজন রোল করেছে, অপর জন করেনি
-            refundBoth(s);
-            close(s, GameStatus.CANCELLED, "ম্যাচ বাতিল, ফি ফেরত দেওয়া হয়েছে");
-            return;
-        }
-        User winner = leaver == 1 ? s.getPlayer2() : s.getPlayer1();   // খেলার মাঝে বের হলে হার
-        payWinner(s, winner);
-        close(s, GameStatus.FINISHED, loseMsg);
-    }
-
-    // =====================================================================
-    // 5) টাইমআউট (Cleanup task কল করবে)
-    // =====================================================================
-    /** ফি কাটা হয়েছে, অপর জন সময়মতো প্রথম রোল করেনি, দুজনকে ফেরত */
-    @Transactional
-    public void timeoutFirstRoll(Long sid) {
-        GameSession s = lock(sid);
-        if (s.getStatus() != GameStatus.ONGOING || !s.isFeeDeducted() || s.isBothRolled()) return;
-        refundBoth(s);
-        close(s, GameStatus.CANCELLED, "প্রতিপক্ষ রোল না করায় ম্যাচ বাতিল, ফি ফেরত");
-    }
-
-    /** কেউ রোল করেনি, ফি কাটা হয়নি, শুধু বাতিল */
-    @Transactional
-    public void cancelIdle(Long sid) {
-        GameSession s = lock(sid);
-        if (s.isFeeDeducted()) return;
-        if (s.getStatus() != GameStatus.MATCH_FOUND && s.getStatus() != GameStatus.ONGOING) return;
-        close(s, GameStatus.CANCELLED, "কেউ খেলা শুরু না করায় ম্যাচ বাতিল");
-    }
-
-    // =====================================================================
-    // Internal helpers
-    // =====================================================================
-    private GameSession lock(Long sid) {
-        return sessions.findByIdForUpdate(sid)
-                .orElseThrow(() -> new IllegalArgumentException("Session not found"));
-    }
-
-    /** দুজনকে id অনুযায়ী সাজিয়ে লক + DB থেকে রিফ্রেশ (stale ব্যালেন্স এড়াতে) */
-    private User[] lockPlayers(GameSession s) {
-        List<User> list = new java.util.ArrayList<>(List.of(s.getPlayer1(), s.getPlayer2()));
-        list.sort(Comparator.comparing(User::getId));
-        for (User u : list) em.refresh(u, LockModeType.PESSIMISTIC_WRITE);
-        return new User[]{s.getPlayer1(), s.getPlayer2()};
-    }
-
-    private void refundBoth(GameSession s) {
-        for (User u : lockPlayers(s)) {
-            u.addToDepositBalance(s.getEntryFee());            // ধরে নিয়েছি রিফান্ড deposit এ যাবে
-            logTx(u, s, TxType.REFUND, s.getEntryFee());
-        }
-    }
-
-    private void payWinner(GameSession s, User winner) {
-        em.refresh(winner, LockModeType.PESSIMISTIC_WRITE);
-        BigDecimal pot = s.getTotalPot();
-        winner.addToWithdrawBalance(pot);
-        winner.addLifetimeEarnings(pot.subtract(s.getEntryFee()));   // নিট লাভ
-        s.setWinner(winner);
-        logTx(winner, s, TxType.WIN, pot);
-        wallet.save(new WalletTransaction(null, s.getId(), TxType.COMMISSION, s.getCommission(), null));
-    }
-
-    private void logTx(User u, GameSession s, TxType type, BigDecimal amount) {
-        wallet.save(new WalletTransaction(u.getId(), s.getId(), type, amount, u.getBalance()));
-    }
-
-    private void close(GameSession s, GameStatus st, String msg) {
-        s.setStatus(st);
-        s.setEndTime(LocalDateTime.now());
-        s.setTurnDeadline(null);                               // টাইমার বন্ধ
-        Map<String, Object> p = new HashMap<>();
-        p.put("sessionId", s.getId());
-        p.put("status", st);
-        p.put("message", msg);
-        p.put("winnerGameId", s.getWinner() != null ? s.getWinner().getGameId() : null);
-        notifyBoth(s, p);
-    }
-
-    /** কমিট হওয়ার পরেই WebSocket মেসেজ, নইলে রোলব্যাকের পরেও ক্লায়েন্ট ভুল খবর পাবে */
-    private void notifyBoth(GameSession s, Map<String, Object> payload) {
-        String g1 = s.getPlayer1().getGameId();
-        String g2 = s.getPlayer2().getGameId();
-        Runnable send = () -> {
-            ws.convertAndSend("/topic/game/" + g1, payload);
-            ws.convertAndSend("/topic/game/" + g2, payload);
-        };
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override public void afterCommit() { send.run(); }
-            });
+    private void quit(GameState s, int leaver, String loseMsg) {
+        if (!s.feeDeducted) {
+            money.refundAndCancel(s.id, "ম্যাচ বাতিল");
+        } else if (!s.bothRolled()) {
+            money.refundAndCancel(s.id, "ম্যাচ বাতিল, ফি ফেরত দেওয়া হয়েছে");
         } else {
-            send.run();
+            money.payout(s.id, leaver == 1 ? 2 : 1, loseMsg);
         }
+        store.delete(s.id);
+    }
+
+    // =====================================================================
+    // 5) কেউ রোল করেনি, ফি কাটা হয়নি, শুধু বাতিল (GameCleanupTask ও InactiveMatchScheduler কল করে)
+    // =====================================================================
+    public void cancelIdle(Long sid) {
+        lock.with(sid, () -> {
+            if (money.cancelIfIdle(sid, null, "কেউ খেলা শুরু না করায় ম্যাচ বাতিল")) {
+                store.delete(sid);
+            }
+            return null;
+        });
     }
 }
