@@ -6,6 +6,12 @@ import java.time.LocalDateTime;
 import java.util.Objects;
 
 @Entity
+@Table(name = "match_request", indexes = {
+        // ম্যাচ খোঁজার কোয়েরি: একই ফি, অপেক্ষমাণ, সবচেয়ে পুরনো আগে
+        @Index(name = "idx_mr_wait", columnList = "entry_fee, matched, request_time"),
+        // একই ইউজারের অপেক্ষমাণ রিকোয়েস্ট মোছার জন্য
+        @Index(name = "idx_mr_user", columnList = "user_id, matched")
+})
 public class MatchRequest {
 
     @Id
@@ -15,10 +21,12 @@ public class MatchRequest {
     @ManyToOne(fetch = FetchType.LAZY)
     private User user;
 
-    private BigDecimal entryFee;  // ✅ int থেকে BigDecimal এ পরিবর্তন
+    @Column(name = "entry_fee", nullable = false, precision = 19, scale = 2)
+    private BigDecimal entryFee;
 
     private boolean matched;
 
+    @Column(name = "request_time")
     private LocalDateTime requestTime;
 
     // Getters and Setters
@@ -39,8 +47,7 @@ public class MatchRequest {
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
-        if (!(o instanceof MatchRequest)) return false;
-        MatchRequest that = (MatchRequest) o;
+        if (!(o instanceof MatchRequest that)) return false;
         return Objects.equals(id, that.id);
     }
 
