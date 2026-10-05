@@ -1,7 +1,5 @@
 package com.yourcompany.ludo.service;
 
-import com.yourcompany.ludo.model.GameSession;
-
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,16 +17,7 @@ public final class DicePicker {
 
     public static final int HOME = 57;
 
-    /** সম্পূর্ণ ট্র্যাকের সেফ ঘর (Flutter এর kSafeTrack এর সাথে মিল) */
     private static final Set<Integer> SAFE_TRACK = Set.of(0, 8, 13, 21, 26, 34, 39, 47);
-
-    // ---------------------------------------------------------------
-    // ⚠ একমাত্র জায়গা যেটা আপনার GameSession অনুযায়ী মিলিয়ে নিতে হবে
-    // ---------------------------------------------------------------
-    public static int[] tokens(GameSession s, int slot) {
-        java.util.List<Integer> l = slot == 1 ? s.getPlayer1Tokens() : s.getPlayer2Tokens();
-        return l.stream().mapToInt(Integer::intValue).toArray();
-    }
 
     /** গুটি p তে dice v দিলে কোথায় যাবে; অবৈধ হলে -1 */
     static int dest(int p, int v) {
@@ -37,14 +26,13 @@ public final class DicePicker {
         return -1;
     }
 
-    /** ট্র্যাকের সেফ ঘর? (৫২+ হোম কলাম ও ৫৭ হোম সবসময় নিরাপদ, ডাবল ধরা হয় না) */
+    /** ট্র্যাকের সেফ ঘর? (৫২+ হোম কলাম ও ৫৭ হোম সবসময় নিরাপদ) */
     static boolean safeCell(int slot, int pos) {
         if (pos <= 0 || pos >= 52) return true;
         int off = slot == 1 ? 0 : 26;
         return SAFE_TRACK.contains((pos - 1 + off) % 52);
     }
 
-    /** i নম্বর গুটি d ঘরে গেলে নিজের অন্য গুটির সাথে অসেফ ঘরে ডাবল হয়? */
     static boolean makesDouble(int slot, int[] mine, int i, int d) {
         if (d < 0 || safeCell(slot, d)) return false;
         for (int j = 0; j < mine.length; j++) {
@@ -53,7 +41,6 @@ public final class DicePicker {
         return false;
     }
 
-    /** এই সংখ্যায় কোনো বৈধ চাল ডাবল বানায় কি না */
     static boolean anyDouble(int slot, int[] mine, int v) {
         for (int i = 0; i < mine.length; i++) {
             int d = dest(mine[i], v);
@@ -62,7 +49,7 @@ public final class DicePicker {
         return false;
     }
 
-    static boolean allInYard(int[] mine) {
+    public static boolean allInYard(int[] mine) {
         for (int p : mine) if (p != 0) return false;
         return true;
     }
@@ -76,10 +63,10 @@ public final class DicePicker {
         boolean excludeSix = !allowSix;
 
         if (allInYard(mine) && allowSix) {
-            if (noSixStreak >= 4) return 6;                     // ৫ম রোল: নিশ্চিত
-            if (noSixStreak == 3) {                              // ৪র্থ রোল: ৫০%
+            if (noSixStreak >= 4) return 6;
+            if (noSixStreak == 3) {
                 if (rnd.nextBoolean()) return 6;
-                excludeSix = true;                               // না হলে ৫ম রোলে ৬ আসবে
+                excludeSix = true;
             }
         }
 
@@ -94,7 +81,7 @@ public final class DicePicker {
         return pool.get(rnd.nextInt(pool.size()));
     }
 
-    /** অটো-চালের জন্য গুটি বাছাই: হোমে পৌঁছানো > ডাবল এড়ানো > ঘর থেকে বের > এগিয়ে থাকা */
+    /** অটো-চালের গুটি: হোমে পৌঁছানো > ডাবল এড়ানো > ঘর থেকে বের > এগিয়ে থাকা */
     public static int autoToken(int slot, int[] mine, int value) {
         int best = -1, bestScore = Integer.MIN_VALUE;
         for (int i = 0; i < mine.length; i++) {
