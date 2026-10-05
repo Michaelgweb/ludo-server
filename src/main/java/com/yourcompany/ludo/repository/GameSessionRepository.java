@@ -18,6 +18,9 @@ public interface GameSessionRepository extends JpaRepository<GameSession, Long> 
 
     List<GameSession> findByPlayer1OrPlayer2(User player1, User player2);
 
+    /** সার্ভার চালুর রিকভারির জন্য */
+    List<GameSession> findByStatus(GameStatus status);
+
     @Query("SELECT g.winner.id, COUNT(g) FROM GameSession g WHERE g.winner IS NOT NULL GROUP BY g.winner.id ORDER BY COUNT(g) DESC")
     List<Object[]> countWinsByUser();
 
@@ -45,10 +48,12 @@ public interface GameSessionRepository extends JpaRepository<GameSession, Long> 
            "AND g.matchStartTimestamp IS NOT NULL AND g.matchStartTimestamp <= :nowMillis")
     List<Long> findIdsReadyToStart(@Param("status") GameStatus status, @Param("nowMillis") long nowMillis);
 
-    /** ফি কাটা হয়েছে, কিন্তু অপর জন নির্দিষ্ট সময়ে প্রথম রোল করেনি */
+    /**
+     * ফি কাটা হয়েছে, প্রথম রোলের পর cutoff পার। কেউ দুজন রোল করেছে কিনা এখন Redis-এ,
+     * তাই এখানে শুধু প্রার্থী আইডি আসে; GameFlowService.timeoutFirstRoll Redis দেখে সিদ্ধান্ত নেয়।
+     */
     @Query("SELECT g.id FROM GameSession g WHERE g.status = :status " +
-           "AND g.feeDeducted = true AND g.firstRollAt < :cutoff " +
-           "AND (g.player1DiceCount = 0 OR g.player2DiceCount = 0)")
+           "AND g.feeDeducted = true AND g.firstRollAt < :cutoff")
     List<Long> findIdsFirstRollTimedOut(@Param("status") GameStatus status, @Param("cutoff") LocalDateTime cutoff);
 
     /** কেউই রোল করেনি (ফি কাটা হয়নি), অনেকক্ষণ পার */
@@ -56,11 +61,4 @@ public interface GameSessionRepository extends JpaRepository<GameSession, Long> 
            "AND g.feeDeducted = false AND g.startTime < :cutoff")
     List<Long> findIdsIdleWithoutFee(@Param("statuses") Collection<GameStatus> statuses,
                                      @Param("cutoff") LocalDateTime cutoff);
-
-    // ---------------- ১৫ সেকেন্ড টার্ন টাইমার ----------------
-    /** ONGOING ম্যাচ যেখানে রোল/চালের সময় (turnDeadline) পার হয়ে গেছে */
-    @Query("SELECT g.id FROM GameSession g " +
-           "WHERE g.status = com.yourcompany.ludo.model.GameStatus.ONGOING " +
-           "AND g.turnDeadline IS NOT NULL AND g.turnDeadline < :now")
-    List<Long> findExpiredTurnIds(@Param("now") long now);
 }
