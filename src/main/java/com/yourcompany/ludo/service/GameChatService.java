@@ -1,46 +1,35 @@
 package com.yourcompany.ludo.service;
 
-import com.yourcompany.ludo.model.GameSession;
-import com.yourcompany.ludo.model.GameStatus;
-import com.yourcompany.ludo.repository.GameSessionRepository;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * গেমের ভেতরের চ্যাট (মেসেজ + ইমোজি)।
- * কিছুই ডাটাবেসে বা ফাইলে সেভ হয় না; শুধু যাচাই করে প্রতিপক্ষকে পাঠানো হয়।
- * মুছে ফেলার কাজ (১ মিনিট / নতুন মেসেজ / গেম শেষ) ক্লায়েন্টে হয়।
+ * গেমের ভেতরের চ্যাট (মেসেজ + ইমোজি)। কিছুই সেভ হয় না; শুধু যাচাই করে প্রতিপক্ষকে পাঠানো হয়।
  */
 @Service
 public class GameChatService {
 
-    public static final int MAX_LEN = 60;          // অক্ষর (ইমোজি ১টা = ১)
-    private static final long MIN_GAP_MS = 800;    // স্প্যাম আটকাতে
+    public static final int MAX_LEN = 60;
+    private static final long MIN_GAP_MS = 800;
 
-    private final GameSessionRepository sessions;
+    private final GameStateStore store;
 
-    /** শুধু মেমরিতে: কে সর্বশেষ কখন পাঠিয়েছে (মেসেজের লেখা রাখা হয় না) */
+    /** শুধু মেমরিতে: কে সর্বশেষ কখন পাঠিয়েছে */
     private final Map<String, Long> lastSent = new ConcurrentHashMap<>();
 
-    public GameChatService(GameSessionRepository sessions) {
-        this.sessions = sessions;
+    public GameChatService(GameStateStore store) {
+        this.store = store;
     }
 
     public record ChatMsg(int from, String text, long id) {}
 
-    @Transactional(readOnly = true)
     public ChatMsg validate(Long sid, String gameId, String raw) {
-        GameSession s = sessions.findById(sid)
-                .orElseThrow(() -> new IllegalArgumentException("Session not found"));
+        GameState s = store.load(sid);
+        if (s == null) throw new IllegalStateException("Game not active");
 
-        if (s.getStatus() != GameStatus.ONGOING) {
-            throw new IllegalStateException("Game not active");
-        }
-
-        int slot = s.slotOf(gameId);                   // ম্যাচের খেলোয়াড় না হলে IllegalArgumentException
+        int slot = s.slotOf(gameId);                     // ম্যাচের খেলোয়াড় না হলে IllegalArgumentException
 
         String text = clean(raw);
 
@@ -70,4 +59,3 @@ public class GameChatService {
         return t;
     }
 }
- 
