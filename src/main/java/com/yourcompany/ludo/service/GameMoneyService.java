@@ -28,9 +28,9 @@ import java.util.Map;
  * গেমের সব টাকা-সংক্রান্ত DB কাজ। প্রতিটি মেথড আগে সেশন রো লক করে।
  *
  * ব্যালেন্স লজিক:
- *  - ফি কাটা: ব্যালেন্স কমে + টার্নওভার ১০০% কমে (User.deduct)
+ *  - ফি কাটা: ব্যালেন্স কমে + টার্নওভার ১০০% কমে (User.deduct), আসলে কত কমল তা GameSession এ সেভ হয়
  *  - জেতা টাকা: শুধু ব্যালেন্স বাড়ে, টার্নওভার বাড়ে না (User.addWinnings)
- *  - বাতিল/রিফান্ড: ব্যালেন্স ও টার্নওভার দুটোই ফেরত (User.refundEntryFee)
+ *  - বাতিল/রিফান্ড: ব্যালেন্স পুরো ফেরত, টার্নওভার শুধু যতটুকু কমেছিল ততটুকু ফেরত (User.refundEntryFee)
  */
 @Service
 public class GameMoneyService {
@@ -85,9 +85,10 @@ public class GameMoneyService {
             close(s, GameStatus.CANCELLED, "ব্যালেন্স অপর্যাপ্ত, ম্যাচ বাতিল");
             return false;
         }
-        for (User u : ps) {
-            u.deduct(fee);                      // ব্যালেন্স কমে + টার্নওভার ১০০% কমে
-            logTx(u, s, TxType.ENTRY_FEE, fee.negate());
+        for (int i = 0; i < 2; i++) {
+            BigDecimal cut = ps[i].deduct(fee);          // ব্যালেন্স কমে, টার্নওভার আসলে কত কমল তা ফেরত
+            s.setTurnoverCut(i + 1, cut);                // রিফান্ডে ঠিক এতটাই ফেরত যাবে
+            logTx(ps[i], s, TxType.ENTRY_FEE, fee.negate());
         }
         s.setFeeDeducted(true);
         s.setFirstRollAt(LocalDateTime.now());
@@ -152,11 +153,12 @@ public class GameMoneyService {
         return new User[]{s.getPlayer1(), s.getPlayer2()};
     }
 
-    /** বাতিল ম্যাচে ফি ফেরত: ব্যালেন্স + টার্নওভার দুটোই আগের অবস্থায় */
+    /** বাতিল ম্যাচে ফি ফেরত: ব্যালেন্স পুরো, টার্নওভার শুধু যতটুকু কমেছিল ততটুকু */
     private void refundBoth(GameSession s) {
-        for (User u : lockPlayers(s)) {
-            u.refundEntryFee(s.getEntryFee());
-            logTx(u, s, TxType.REFUND, s.getEntryFee());
+        User[] ps = lockPlayers(s);
+        for (int i = 0; i < 2; i++) {
+            ps[i].refundEntryFee(s.getEntryFee(), s.getTurnoverCut(i + 1));
+            logTx(ps[i], s, TxType.REFUND, s.getEntryFee());
         }
     }
 
