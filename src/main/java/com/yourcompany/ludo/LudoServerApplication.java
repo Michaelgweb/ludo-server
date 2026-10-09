@@ -43,7 +43,7 @@ public class LudoServerApplication {
     CommandLineRunner createAdmin(UserRepository userRepository, PasswordEncoder encoder) {
         return args -> {
             // Environment variable থেকে পড়ুন; না থাকলে আগের ডিফল্ট ব্যবহার হবে
-            String adminMobile = System.getenv().getOrDefault("ADMIN_MOBILE", "01887869824");
+            String adminMobile = System.getenv().getOrDefault("ADMIN_MOBILE", "8801887869824");
             String adminPassword = System.getenv().getOrDefault("ADMIN_PASSWORD", "87869824");
 
             // Check if admin already exists by mobile
@@ -55,9 +55,11 @@ public class LudoServerApplication {
                 admin.setMobile(adminMobile);
                 admin.setPassword(encoder.encode(adminPassword));
 
-                // ✅ FIX: setBalance() নেই। balance = depositBalance + withdrawBalance
-                admin.setDepositBalance(BigDecimal.ZERO);
-                admin.setWithdrawBalance(BigDecimal.ZERO);
+                // একটাই ব্যালেন্স + টার্নওভার (দুটোই ০ থেকে শুরু)
+                admin.setBalance(BigDecimal.ZERO);
+                admin.setTurnoverBalance(BigDecimal.ZERO);
+                admin.setLifetimeEarnings(BigDecimal.ZERO);
+                admin.setLifetimeWithdraw(BigDecimal.ZERO);
 
                 admin.setRole(User.Role.ADMIN);
                 admin.setGameId(generateUniqueGameId(userRepository));
