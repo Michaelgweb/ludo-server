@@ -52,6 +52,10 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         return new BigDecimal(value).setScale(2, RoundingMode.DOWN);
     }
 
+    private static BigDecimal scale(BigDecimal v) {
+        return (v == null ? BigDecimal.ZERO : v).setScale(2, RoundingMode.DOWN);
+    }
+
     // ================= AUTOWIRE =================
     @Autowired
     private UserRepository userRepository;
@@ -109,14 +113,17 @@ public class UserServiceImpl implements UserService, UserDetailsService {
                 .id(user.getId())
                 .mobile(user.getMobile())
                 .gameId(user.getGameId())
-                .balance(calculateTotal(user))
-                .depositBalance(user.getDepositBalance())
-                .withdrawBalance(user.getWithdrawBalance())
+                .balance(scale(user.getBalance()))
+                .turnoverBalance(scale(user.getTurnoverBalance()))
+                .withdrawableBalance(scale(user.getWithdrawableBalance()))
+                .lifetimeEarnings(scale(user.getLifetimeEarnings()))
+                .lifetimeWithdraw(scale(user.getLifetimeWithdraw()))
                 .role(user.getRole().name())
                 .avatarUrl(user.getAvatarUrl())
                 .displayName(user.getDisplayName())
-                .lifetimeEarnings(user.getLifetimeEarnings())
                 .referralCode(user.getReferralCode())
+                .referredBy(user.getReferredBy())
+                .signupBonusClaimed(user.isSignupBonusClaimed())
                 .build();
     }
 
@@ -149,15 +156,7 @@ public class UserServiceImpl implements UserService, UserDetailsService {
                 .orElseThrow(() -> new RuntimeException("User not found"));
     }
 
-    // ================= TOTAL BALANCE =================
-    private BigDecimal calculateTotal(User user) {
-        BigDecimal deposit = user.getDepositBalance() == null ? BigDecimal.ZERO : user.getDepositBalance();
-        BigDecimal winning = user.getWithdrawBalance() == null ? BigDecimal.ZERO : user.getWithdrawBalance();
-
-        return deposit.add(winning).setScale(2, RoundingMode.DOWN);
-    }
-
-    // ================= DEPOSIT BALANCE ADD =================
+    // ================= DEPOSIT (balance + turnover বাড়ে) =================
     @Transactional(rollbackFor = Exception.class)
     public void addDepositBalance(String gameId, BigDecimal amount) {
         if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
@@ -165,17 +164,14 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         }
 
         User user = lockAndGetByGameId(gameId);
-        BigDecimal deposit = user.getDepositBalance() == null ? BigDecimal.ZERO : user.getDepositBalance();
-
-        deposit = deposit.add(amount).setScale(2, RoundingMode.DOWN);
-        user.setDepositBalance(deposit);
+        user.addDeposit(scale(amount));
 
         userRepository.saveAndFlush(user);
         sendProfile(user);
         sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
     }
 
-    // ================= WINNING BALANCE ADD =================
+    // ================= WINNING (শুধু balance + lifetimeEarnings বাড়ে) =================
     @Transactional(rollbackFor = Exception.class)
     public void addWinningBalance(String gameId, BigDecimal amount) {
         if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
@@ -183,13 +179,9 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         }
 
         User user = lockAndGetByGameId(gameId);
-        BigDecimal winning = user.getWithdrawBalance() == null ? BigDecimal.ZERO : user.getWithdrawBalance();
-
-        winning = winning.add(amount).setScale(2, RoundingMode.DOWN);
-        user.setWithdrawBalance(winning);
-
-        BigDecimal lifetime = user.getLifetimeEarnings() == null ? BigDecimal.ZERO : user.getLifetimeEarnings();
-        user.setLifetimeEarnings(lifetime.add(amount).setScale(2, RoundingMode.DOWN));
+        BigDecimal a = scale(amount);
+        user.addWinnings(a);
+        user.addLifetimeEarnings(a);
 
         userRepository.saveAndFlush(user);
         sendProfile(user);
@@ -203,17 +195,26 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         User user = userRepository.findByGameId(gameId)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        return calculateTotal(user);
+        return scale(user.getBalance());
     }
 
-    // ================= ADD BALANCE =================
+    @Override
+    @Transactional(readOnly = true)
+    public BigDecimal getTurnoverBalance(String gameId) {
+        return userRepository.findByGameId(gameId)
+                .map(u -> scale(u.getTurnoverBalance()))
+                .orElse(bd("0.00"));
+    }
+
+    // ================= ADD BALANCE (ডিপোজিট) =================
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addBalance(String gameId, BigDecimal amount) {
         addDepositBalance(gameId, amount);
     }
 
-    // ================= DEDUCT BALANCE =================
+    // ================= DEDUCT BALANCE (এন্ট্রি ফি) =================
+    // ব্যালেন্স কমে + টার্নওভার ১০০% কমে (০ এর নিচে যায় না)
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deductBalance(String gameId, BigDecimal amount) {
@@ -222,58 +223,33 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         }
 
         User user = lockAndGetByGameId(gameId);
-
-        BigDecimal deposit = user.getDepositBalance() == null ? BigDecimal.ZERO : user.getDepositBalance();
-        BigDecimal winning = user.getWithdrawBalance() == null ? BigDecimal.ZERO : user.getWithdrawBalance();
-        BigDecimal total = deposit.add(winning);
-
-        if (total.compareTo(amount) < 0) {
-            throw new RuntimeException("Insufficient Balance");
-        }
-
-        // CUT DEPOSIT FIRST
-        if (deposit.compareTo(amount) >= 0) {
-            deposit = deposit.subtract(amount);
-        } else {
-            BigDecimal remaining = amount.subtract(deposit);
-            deposit = BigDecimal.ZERO;
-            winning = winning.subtract(remaining);
-        }
-
-        user.setDepositBalance(deposit.setScale(2, RoundingMode.DOWN));
-        user.setWithdrawBalance(winning.setScale(2, RoundingMode.DOWN));
+        user.deduct(scale(amount)); // Insufficient হলে IllegalStateException
 
         userRepository.saveAndFlush(user);
         sendProfile(user);
         sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
     }
 
-    // ================= SET DEPOSIT =================
+    // ================= SET BALANCE (অ্যাডমিন) =================
+    @Override
     @Transactional(rollbackFor = Exception.class)
-    public void setDepositBalance(String gameId, BigDecimal value) {
+    public void setBalance(String gameId, BigDecimal newBalance) {
+        if (newBalance == null || newBalance.signum() < 0) {
+            throw new IllegalArgumentException("Invalid balance");
+        }
+
         User user = lockAndGetByGameId(gameId);
-        user.setDepositBalance(value.setScale(2, RoundingMode.DOWN));
+        user.setBalance(scale(newBalance));
 
         userRepository.saveAndFlush(user);
         sendProfile(user);
         sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
     }
 
-    // ================= SET WINNING =================
-    @Transactional(rollbackFor = Exception.class)
-    public void setWinningBalance(String gameId, BigDecimal value) {
-        User user = lockAndGetByGameId(gameId);
-        user.setWithdrawBalance(value.setScale(2, RoundingMode.DOWN));
-
-        userRepository.saveAndFlush(user);
-        sendProfile(user);
-        sendEvent(EVENT_WIN_UPDATED, gameId, toDto(user));
-    }
-
-    // ================= REFUND =================
+    // ================= REFUND (ম্যাচ বাতিল: টাকা + টার্নওভার ফেরত) =================
     @Transactional(rollbackFor = Exception.class)
     public void refundBalance(String gameId, BigDecimal amount) {
-        addWinningBalance(gameId, amount);
+        addDepositBalance(gameId, amount);
     }
 
     // ================= CREDIT WIN =================
@@ -285,6 +261,29 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         }
 
         addWinningBalance(user.getGameId(), amount);
+    }
+
+    // ================= WITHDRAW FLOW =================
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void holdForWithdraw(String gameId, BigDecimal amount) {
+        User user = lockAndGetByGameId(gameId);
+        user.holdForWithdraw(scale(amount)); // টার্নওভার বাকি থাকলে এরর
+
+        userRepository.saveAndFlush(user);
+        sendProfile(user);
+        sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void refundWithdraw(String gameId, BigDecimal amount) {
+        User user = lockAndGetByGameId(gameId);
+        user.refundWithdraw(scale(amount));
+
+        userRepository.saveAndFlush(user);
+        sendProfile(user);
+        sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
     }
 
     // ================= BONUS HISTORY =================
@@ -310,6 +309,7 @@ public class UserServiceImpl implements UserService, UserDetailsService {
             locked.setSignupBonusClaimed(true);
             userRepository.saveAndFlush(locked);
 
+            // বোনাসও ডিপোজিটের মতো: ব্যালেন্স + টার্নওভার
             addDepositBalance(locked.getGameId(), SIGNUP_BONUS);
             recordBonus(locked.getGameId(), "SIGNUP", SIGNUP_BONUS, null, "COMPLETED");
         }
@@ -385,9 +385,10 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         User user = new User();
         user.setMobile(mobile);
         user.setPassword(passwordEncoder.encode(password));
-        user.setDepositBalance(bd("0.00"));
-        user.setWithdrawBalance(bd("0.00"));
+        user.setBalance(bd("0.00"));
+        user.setTurnoverBalance(bd("0.00"));
         user.setLifetimeEarnings(bd("0.00"));
+        user.setLifetimeWithdraw(bd("0.00"));
         user.setRole(User.Role.USER);
         user.setGameId(generateUniqueGameId());
         user.setReferralCode(generateUniqueReferralCode());
@@ -408,10 +409,13 @@ public class UserServiceImpl implements UserService, UserDetailsService {
             giveReferralBonus(saved.getGameId(), referralCode.trim());
         }
 
-        sendProfile(saved);
-        sendEvent(EVENT_PROFILE_CREATED, saved.getGameId(), toDto(saved));
+        // সাইনআপ বোনাস যোগ হওয়ার পরের নতুন মান নিয়ে আসি
+        User fresh = userRepository.findByGameId(saved.getGameId()).orElse(saved);
 
-        return saved;
+        sendProfile(fresh);
+        sendEvent(EVENT_PROFILE_CREATED, fresh.getGameId(), toDto(fresh));
+
+        return fresh;
     }
 
     // ================= LOGIN =================
@@ -540,41 +544,23 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     }
 
     // ================= BALANCE UPDATE EVENT =================
-    // ⚠️ নামে notify হলেও এটা amount যোগ করে। কোথাও কল হচ্ছে কিনা দেখে নিন।
+    // ⚠️ নামে notify হলেও এটা amount যোগ করে (ডিপোজিট হিসেবে)। কোথাও কল হচ্ছে কিনা দেখে নিন।
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void notifyBalanceUpdate(String gameId, BigDecimal amount) {
         addDepositBalance(gameId, amount);
     }
 
-    // ================= SET TOTAL BALANCE =================
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void setBalance(String gameId, BigDecimal newBalance) {
-        User user = lockAndGetByGameId(gameId);
-
-        BigDecimal winning = user.getWithdrawBalance() == null ? BigDecimal.ZERO : user.getWithdrawBalance();
-        BigDecimal deposit = newBalance.subtract(winning);
-
-        if (deposit.compareTo(BigDecimal.ZERO) < 0) {
-            deposit = BigDecimal.ZERO;
-        }
-
-        user.setDepositBalance(deposit.setScale(2, RoundingMode.DOWN));
-
-        userRepository.saveAndFlush(user);
-        sendProfile(user);
-        sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
-    }
-
     // ================= LIFETIME EARNING =================
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addToLifetimeEarnings(String gameId, BigDecimal amount) {
-        User user = lockAndGetByGameId(gameId);
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Invalid amount");
+        }
 
-        BigDecimal current = user.getLifetimeEarnings() == null ? BigDecimal.ZERO : user.getLifetimeEarnings();
-        user.setLifetimeEarnings(current.add(amount).setScale(2, RoundingMode.DOWN));
+        User user = lockAndGetByGameId(gameId);
+        user.addLifetimeEarnings(scale(amount));
 
         userRepository.saveAndFlush(user);
         sendEvent(EVENT_LIFETIME_UPDATED, gameId, toDto(user));
@@ -583,24 +569,33 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     @Override
     public BigDecimal getLifetimeEarnings(String gameId) {
         return userRepository.findByGameId(gameId)
-                .map(User::getLifetimeEarnings)
+                .map(u -> scale(u.getLifetimeEarnings()))
                 .orElse(bd("0.00"));
     }
 
     @Override
-    public BigDecimal getWithdrawBalance(String gameId) {
+    public BigDecimal getLifetimeWithdraw(String gameId) {
         return userRepository.findByGameId(gameId)
-                .map(User::getWithdrawBalance)
+                .map(u -> scale(u.getLifetimeWithdraw()))
                 .orElse(bd("0.00"));
     }
 
+    // উত্তোলনযোগ্য টাকা (টার্নওভার বাকি থাকলে ০)
+    @Override
+    public BigDecimal getWithdrawBalance(String gameId) {
+        return userRepository.findByGameId(gameId)
+                .map(u -> scale(u.getWithdrawableBalance()))
+                .orElse(bd("0.00"));
+    }
+
+    // জেতা টাকা যোগ (শুধু ব্যালেন্স + লাইফটাইম আয়)
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addWithdrawBalance(String gameId, BigDecimal amount) {
         addWinningBalance(gameId, amount);
     }
 
-    // ✅ FIX: আগে এটা lifetimeEarnings বাড়াত; এখন সঠিকভাবে lifetimeWithdraw বাড়ায়
+    // শুধু উত্তোলন সফল (অ্যাডমিন অ্যাপ্রুভ) হলে কল করুন। ব্যালেন্সে প্রভাব নেই।
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void addLifetimeWithdraw(String gameId, BigDecimal amount) {
@@ -609,11 +604,10 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         }
 
         User user = lockAndGetByGameId(gameId);
-
-        BigDecimal current = user.getLifetimeWithdraw() == null ? BigDecimal.ZERO : user.getLifetimeWithdraw();
-        user.setLifetimeWithdraw(current.add(amount).setScale(2, RoundingMode.DOWN));
+        user.markWithdrawSuccess(scale(amount));
 
         userRepository.saveAndFlush(user);
+        sendProfile(user);
         sendEvent(EVENT_LIFETIME_UPDATED, gameId, toDto(user));
     }
 
@@ -905,7 +899,7 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         return toDto(user);
     }
 
-    // ================= GET ALL USERS ✅ FIXED =================
+    // ================= GET ALL USERS =================
     @Override
     @Transactional(readOnly = true)
     public List<UserDto> getAllUsers() {
