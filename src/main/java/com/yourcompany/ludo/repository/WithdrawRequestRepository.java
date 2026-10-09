@@ -2,14 +2,18 @@ package com.yourcompany.ludo.repository;
 
 import com.yourcompany.ludo.model.WithdrawRequest;
 import com.yourcompany.ludo.model.User;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface WithdrawRequestRepository extends JpaRepository<WithdrawRequest, Long> {
@@ -19,6 +23,11 @@ public interface WithdrawRequestRepository extends JpaRepository<WithdrawRequest
     List<WithdrawRequest> findByStatus(WithdrawRequest.Status status);
 
     boolean existsByTransactionId(String transactionId);
+
+    /** অ্যাপ্রুভ/রিজেক্টে রিকোয়েস্ট রো লক করে, যাতে একই রিকোয়েস্ট দুবার প্রসেস না হয় */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT w FROM WithdrawRequest w WHERE w.id = :id")
+    Optional<WithdrawRequest> findByIdForUpdate(@Param("id") Long id);
 
     @Modifying
     @Transactional
