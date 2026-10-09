@@ -144,16 +144,32 @@ public class User implements UserDetails {
         }
     }
 
-    /** গেমের এন্ট্রি ফি: ব্যালেন্স থেকে কাটে, টার্নওভার ১০০% কমে (০ এর নিচে যাবে না) */
-    public void deduct(BigDecimal amount) {
+    /**
+     * গেমের এন্ট্রি ফি: ব্যালেন্স থেকে কাটে, টার্নওভার ১০০% কমে (০ এর নিচে যাবে না)।
+     * রিটার্ন: টার্নওভার আসলে কত কমল (০ এ আটকে গেলে ফি-র চেয়ে কম হতে পারে)।
+     * বাতিল ম্যাচে ঠিক এই পরিমাণই refundEntryFee এ ফেরত দিতে হবে।
+     */
+    public BigDecimal deduct(BigDecimal amount) {
         if (amount == null || amount.signum() <= 0) {
             throw new IllegalArgumentException("Invalid amount");
         }
         if (getBalance().compareTo(amount) < 0) {
             throw new IllegalStateException("Insufficient balance");
         }
+        BigDecimal before = getTurnoverBalance();
         this.balance = getBalance().subtract(amount);
-        this.turnoverBalance = getTurnoverBalance().subtract(amount).max(BigDecimal.ZERO);
+        this.turnoverBalance = before.subtract(amount).max(BigDecimal.ZERO);
+        return before.subtract(this.turnoverBalance);
+    }
+
+    /** ম্যাচ বাতিলে ফি ফেরত: পুরো ব্যালেন্স, আর টার্নওভার শুধু যতটুকু কমেছিল ততটুকু */
+    public void refundEntryFee(BigDecimal amount, BigDecimal turnoverRestore) {
+        if (amount != null && amount.signum() > 0) {
+            this.balance = getBalance().add(amount);
+        }
+        if (turnoverRestore != null && turnoverRestore.signum() > 0) {
+            this.turnoverBalance = getTurnoverBalance().add(turnoverRestore);
+        }
     }
 
     /** উত্তোলনের শর্ত: টার্নওভার ০ হতে হবে */
@@ -204,7 +220,7 @@ public class User implements UserDetails {
 
     // ---- পুরনো কোড যেন না ভাঙে (নতুন লজিকে ঘোরানো) ----
 
-    /** @deprecated addDeposit() ব্যবহার করুন। ডিপোজিট/বোনাস/রিফান্ড: ব্যালেন্স + টার্নওভার দুটোই বাড়ে */
+    /** @deprecated addDeposit() ব্যবহার করুন। ডিপোজিট/বোনাস: ব্যালেন্স + টার্নওভার দুটোই বাড়ে। ম্যাচ রিফান্ডে ব্যবহার করবেন না */
     @Deprecated
     public void addToDepositBalance(BigDecimal amount) { addDeposit(amount); }
 
