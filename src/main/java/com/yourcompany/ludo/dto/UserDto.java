@@ -1,5 +1,6 @@
 package com.yourcompany.ludo.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.math.BigDecimal;
@@ -17,14 +18,26 @@ public class UserDto {
 
     private String gameId;
 
+    // ================= WALLET =================
+    // একটাই ব্যালেন্স (ডিপোজিট + জেতা টাকা)
     private BigDecimal balance;
+    // টার্নওভার ব্যালেন্স: ০ হলে উত্তোলন করা যাবে
+    private BigDecimal turnoverBalance;
+    // এই মুহূর্তে উত্তোলনযোগ্য (টার্নওভার বাকি থাকলে ০)
+    private BigDecimal withdrawableBalance;
+    // লাইভ টাইম আয় ও উত্তোলন (শুধু দেখানোর জন্য)
+    private BigDecimal lifetimeEarnings;
+    private BigDecimal lifetimeWithdraw;
+
+    // পুরনো কোড যেন না ভাঙে: রেসপন্সে যাবে না
+    @JsonIgnore
     private BigDecimal depositBalance;
+    @JsonIgnore
     private BigDecimal withdrawBalance;
 
     private String role;
     private String avatarUrl;
     private String displayName;
-    private BigDecimal lifetimeEarnings;
 
     // ================= REFERRAL =================
     private String referralCode;
@@ -91,9 +104,12 @@ public class UserDto {
     // ==================================================
     public UserDto() {
         this.balance = BigDecimal.ZERO;
+        this.turnoverBalance = BigDecimal.ZERO;
+        this.withdrawableBalance = BigDecimal.ZERO;
+        this.lifetimeEarnings = BigDecimal.ZERO;
+        this.lifetimeWithdraw = BigDecimal.ZERO;
         this.depositBalance = BigDecimal.ZERO;
         this.withdrawBalance = BigDecimal.ZERO;
-        this.lifetimeEarnings = BigDecimal.ZERO;
         this.signupBonusClaimed = false;
         this.loginCount = 0;
         this.failedLoginAttempt = 0;
@@ -108,7 +124,7 @@ public class UserDto {
     }
 
     // ==================================================
-    // FULL CONSTRUCTOR
+    // FULL CONSTRUCTOR (আগের সিগনেচারই, কোথাও ব্যবহার থাকলে না ভাঙে)
     // ==================================================
     public UserDto(
             Long id, String mobile, String password, String gameId,
@@ -127,6 +143,7 @@ public class UserDto {
             LocalDateTime lastFailedLogin, String lastLoginDeviceId, String lastLoginUserAgent,
             Boolean blocked, Boolean phoneVerified, Integer totalDevices, Integer maxAllowedDevices
     ) {
+        this();
         this.id = id;
         this.mobile = mobile;
         this.password = password;
@@ -206,13 +223,31 @@ public class UserDto {
     public String getGameId() { return gameId; }
     public void setGameId(String gameId) { this.gameId = gameId; }
 
+    // ---- Wallet ----
     public BigDecimal getBalance() { return balance != null ? balance : BigDecimal.ZERO; }
-    public void setBalance(BigDecimal balance) { this.balance = balance != null ? balance : BigDecimal.ZERO; }
+    public void setBalance(BigDecimal v) { this.balance = v != null ? v : BigDecimal.ZERO; }
 
+    public BigDecimal getTurnoverBalance() { return turnoverBalance != null ? turnoverBalance : BigDecimal.ZERO; }
+    public void setTurnoverBalance(BigDecimal v) { this.turnoverBalance = v != null ? v : BigDecimal.ZERO; }
+
+    public BigDecimal getWithdrawableBalance() { return withdrawableBalance != null ? withdrawableBalance : BigDecimal.ZERO; }
+    public void setWithdrawableBalance(BigDecimal v) { this.withdrawableBalance = v != null ? v : BigDecimal.ZERO; }
+
+    public BigDecimal getLifetimeEarnings() { return lifetimeEarnings != null ? lifetimeEarnings : BigDecimal.ZERO; }
+    public void setLifetimeEarnings(BigDecimal v) { this.lifetimeEarnings = v != null ? v : BigDecimal.ZERO; }
+
+    public BigDecimal getLifetimeWithdraw() { return lifetimeWithdraw != null ? lifetimeWithdraw : BigDecimal.ZERO; }
+    public void setLifetimeWithdraw(BigDecimal v) { this.lifetimeWithdraw = v != null ? v : BigDecimal.ZERO; }
+
+    // পুরনো (JSON এ যাবে না)
+    @JsonIgnore
     public BigDecimal getDepositBalance() { return depositBalance != null ? depositBalance : BigDecimal.ZERO; }
+    @JsonIgnore
     public void setDepositBalance(BigDecimal v) { this.depositBalance = v != null ? v : BigDecimal.ZERO; }
 
+    @JsonIgnore
     public BigDecimal getWithdrawBalance() { return withdrawBalance != null ? withdrawBalance : BigDecimal.ZERO; }
+    @JsonIgnore
     public void setWithdrawBalance(BigDecimal v) { this.withdrawBalance = v != null ? v : BigDecimal.ZERO; }
 
     public String getRole() { return role; }
@@ -223,9 +258,6 @@ public class UserDto {
 
     public String getDisplayName() { return displayName; }
     public void setDisplayName(String displayName) { this.displayName = displayName; }
-
-    public BigDecimal getLifetimeEarnings() { return lifetimeEarnings; }
-    public void setLifetimeEarnings(BigDecimal v) { this.lifetimeEarnings = v != null ? v : BigDecimal.ZERO; }
 
     public String getReferralCode() { return referralCode; }
     public void setReferralCode(String referralCode) { this.referralCode = referralCode; }
@@ -359,14 +391,20 @@ public class UserDto {
         public Builder password(String value) { dto.password = value; return this; }
         public Builder gameId(String value) { dto.gameId = value; return this; }
 
+        // ---- Wallet ----
         public Builder balance(BigDecimal value) { dto.balance = value; return this; }
+        public Builder turnoverBalance(BigDecimal value) { dto.turnoverBalance = value; return this; }
+        public Builder withdrawableBalance(BigDecimal value) { dto.withdrawableBalance = value; return this; }
+        public Builder lifetimeEarnings(BigDecimal value) { dto.lifetimeEarnings = value; return this; }
+        public Builder lifetimeWithdraw(BigDecimal value) { dto.lifetimeWithdraw = value; return this; }
+
+        // পুরনো (JSON এ যাবে না, শুধু পুরনো কোড কম্পাইল হওয়ার জন্য)
         public Builder depositBalance(BigDecimal value) { dto.depositBalance = value; return this; }
         public Builder withdrawBalance(BigDecimal value) { dto.withdrawBalance = value; return this; }
 
         public Builder role(String value) { dto.role = value; return this; }
         public Builder avatarUrl(String value) { dto.avatarUrl = value; return this; }
         public Builder displayName(String value) { dto.displayName = value; return this; }
-        public Builder lifetimeEarnings(BigDecimal value) { dto.lifetimeEarnings = value; return this; }
 
         public Builder referralCode(String value) { dto.referralCode = value; return this; }
         public Builder referredBy(String value) { dto.referredBy = value; return this; }
@@ -397,8 +435,10 @@ public class UserDto {
                 ", mobile='" + mobile + '\'' +
                 ", gameId='" + gameId + '\'' +
                 ", balance=" + balance +
-                ", depositBalance=" + depositBalance +
-                ", withdrawBalance=" + withdrawBalance +
+                ", turnoverBalance=" + turnoverBalance +
+                ", withdrawableBalance=" + withdrawableBalance +
+                ", lifetimeEarnings=" + lifetimeEarnings +
+                ", lifetimeWithdraw=" + lifetimeWithdraw +
                 ", deviceId='" + deviceId + '\'' +
                 ", fingerprint='" + deviceFingerprint + '\'' +
                 ", ipAddress='" + ipAddress + '\'' +
