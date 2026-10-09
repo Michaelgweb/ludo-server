@@ -24,7 +24,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/** গেমের সব টাকা-সংক্রান্ত DB কাজ। প্রতিটি মেথড আগে সেশন রো লক করে */
+/**
+ * গেমের সব টাকা-সংক্রান্ত DB কাজ। প্রতিটি মেথড আগে সেশন রো লক করে।
+ *
+ * ব্যালেন্স লজিক:
+ *  - ফি কাটা: ব্যালেন্স কমে + টার্নওভার ১০০% কমে (User.deduct)
+ *  - জেতা টাকা: শুধু ব্যালেন্স বাড়ে, টার্নওভার বাড়ে না (User.addWinnings)
+ *  - বাতিল/রিফান্ড: ব্যালেন্স ও টার্নওভার দুটোই ফেরত (User.refundEntryFee)
+ */
 @Service
 public class GameMoneyService {
 
@@ -79,7 +86,7 @@ public class GameMoneyService {
             return false;
         }
         for (User u : ps) {
-            u.deduct(fee);
+            u.deduct(fee);                      // ব্যালেন্স কমে + টার্নওভার ১০০% কমে
             logTx(u, s, TxType.ENTRY_FEE, fee.negate());
         }
         s.setFeeDeducted(true);
@@ -145,17 +152,19 @@ public class GameMoneyService {
         return new User[]{s.getPlayer1(), s.getPlayer2()};
     }
 
+    /** বাতিল ম্যাচে ফি ফেরত: ব্যালেন্স + টার্নওভার দুটোই আগের অবস্থায় */
     private void refundBoth(GameSession s) {
         for (User u : lockPlayers(s)) {
-            u.addToDepositBalance(s.getEntryFee());
+            u.refundEntryFee(s.getEntryFee());
             logTx(u, s, TxType.REFUND, s.getEntryFee());
         }
     }
 
+    /** জেতা টাকা: শুধু ব্যালেন্স + লাইফটাইম আয় (টার্নওভার বাড়ে না) */
     private void payWinner(GameSession s, User winner) {
         em.refresh(winner, LockModeType.PESSIMISTIC_WRITE);
         BigDecimal pot = s.getTotalPot();
-        winner.addToWithdrawBalance(pot);
+        winner.addWinnings(pot);
         winner.addLifetimeEarnings(pot.subtract(s.getEntryFee()));
         s.setWinner(winner);
         logTx(winner, s, TxType.WIN, pot);
