@@ -35,15 +35,23 @@ public class User implements UserDetails {
     @Column(nullable = false)
     private String password;
 
-    @Column(nullable = false, precision = 19, scale = 2)
-    private BigDecimal depositBalance = BigDecimal.ZERO;
+    // ---------------- একটাই ব্যালেন্স (ডিপোজিট + জেতা টাকা) ----------------
+    @Column(name = "balance", nullable = false, precision = 19, scale = 2,
+            columnDefinition = "numeric(19,2) default 0")
+    private BigDecimal balance = BigDecimal.ZERO;
 
-    @Column(nullable = false, precision = 19, scale = 2)
-    private BigDecimal withdrawBalance = BigDecimal.ZERO;
+    // ---------------- টার্নওভার ব্যালেন্স ----------------
+    // ডিপোজিটে বাড়ে, গেম খেললে ১০০% কমে। ০ হলে উত্তোলন করা যাবে।
+    @Column(name = "turnover_balance", nullable = false, precision = 19, scale = 2,
+            columnDefinition = "numeric(19,2) default 0")
+    private BigDecimal turnoverBalance = BigDecimal.ZERO;
 
+    // ---------------- লাইভ টাইম আয় (শুধু দেখানোর জন্য) ----------------
     @Column(name = "lifetime_earnings", nullable = false, precision = 19, scale = 2)
     private BigDecimal lifetimeEarnings = BigDecimal.ZERO;
 
+    // ---------------- লাইভ টাইম উত্তোলন (শুধু দেখানোর জন্য) ----------------
+    // উত্তোলন সফল (অ্যাডমিন অ্যাপ্রুভ) হলে বাড়ে। ব্যালেন্সে কোনো প্রভাব নেই।
     @Column(name = "lifetime_withdraw", nullable = false, precision = 19, scale = 2)
     private BigDecimal lifetimeWithdraw = BigDecimal.ZERO;
 
@@ -82,7 +90,7 @@ public class User implements UserDetails {
     @Column(nullable = false)
     private boolean referrerBonusGiven = false;
 
-    // ---------------- লগইন, ডিভাইস ও লোকেশন তথ্য (সব nullable, পুরনো ডেটাবেসে সমস্যা হবে না) ----------------
+    // ---------------- লগইন, ডিভাইস ও লোকেশন তথ্য ----------------
     @Column(name = "login_count")
     private Integer loginCount = 0;
 
@@ -119,15 +127,24 @@ public class User implements UserDetails {
         this.referralCode = generateReferralCode();
     }
 
-    // ---------------- Wallet operations ----------------
+    // ================= Wallet operations =================
 
-    /** মোট ব্যালেন্স = deposit + withdraw */
-    @Transient
-    public BigDecimal getBalance() {
-        return getDepositBalance().add(getWithdrawBalance());
+    /** ডিপোজিট (অ্যাপ্রুভের পর): ব্যালেন্সও বাড়ে, টার্নওভারও সমান বাড়ে */
+    public void addDeposit(BigDecimal amount) {
+        if (amount != null && amount.signum() > 0) {
+            this.balance = getBalance().add(amount);
+            this.turnoverBalance = getTurnoverBalance().add(amount);
+        }
     }
 
-    /** এন্ট্রি ফি কাটা: আগে deposit থেকে, বাকিটা withdraw থেকে */
+    /** জেতা টাকা: শুধু ব্যালেন্স বাড়ে, টার্নওভার বাড়ে না */
+    public void addWinnings(BigDecimal amount) {
+        if (amount != null && amount.signum() > 0) {
+            this.balance = getBalance().add(amount);
+        }
+    }
+
+    /** গেমের এন্ট্রি ফি: ব্যালেন্স থেকে কাটে, টার্নওভার ১০০% কমে (০ এর নিচে যাবে না) */
     public void deduct(BigDecimal amount) {
         if (amount == null || amount.signum() <= 0) {
             throw new IllegalArgumentException("Invalid amount");
@@ -135,29 +152,81 @@ public class User implements UserDetails {
         if (getBalance().compareTo(amount) < 0) {
             throw new IllegalStateException("Insufficient balance");
         }
-        BigDecimal fromDeposit = getDepositBalance().min(amount);
-        this.depositBalance = getDepositBalance().subtract(fromDeposit);
-        this.withdrawBalance = getWithdrawBalance().subtract(amount.subtract(fromDeposit));
+        this.balance = getBalance().subtract(amount);
+        this.turnoverBalance = getTurnoverBalance().subtract(amount).max(BigDecimal.ZERO);
     }
 
-    /** রিফান্ড / ডিপোজিট যোগ */
-    public void addToDepositBalance(BigDecimal amount) {
-        if (amount != null && amount.signum() > 0) {
-            this.depositBalance = getDepositBalance().add(amount);
+    /** উত্তোলনের শর্ত: টার্নওভার ০ হতে হবে */
+    public boolean canWithdraw() {
+        return getTurnoverBalance().signum() <= 0;
+    }
+
+    /** উত্তোলনের আগে চেক */
+    public void assertCanWithdraw(BigDecimal amount) {
+        if (amount == null || amount.signum() <= 0) {
+            throw new IllegalArgumentException("Invalid amount");
+        }
+        if (!canWithdraw()) {
+            throw new IllegalStateException(
+                    "Complete your turnover first. Remaining turnover: " + getTurnoverBalance());
+        }
+        if (getBalance().compareTo(amount) < 0) {
+            throw new IllegalStateException("Insufficient balance");
         }
     }
 
-    /** জেতা টাকা যোগ (উইথড্র করা যাবে) */
-    public void addToWithdrawBalance(BigDecimal amount) {
+    /** ১. উত্তোলন রিকোয়েস্ট দেওয়ার সময়: শুধু ব্যালেন্স কাটে (লাইফটাইম বাড়ে না) */
+    public void holdForWithdraw(BigDecimal amount) {
+        assertCanWithdraw(amount);
+        this.balance = getBalance().subtract(amount);
+    }
+
+    /** ২. উত্তোলন সফল হলে (অ্যাডমিন অ্যাপ্রুভ): লাইভ টাইম উত্তোলন বাড়ে, ইউজারকে শুধু দেখানোর জন্য */
+    public void markWithdrawSuccess(BigDecimal amount) {
         if (amount != null && amount.signum() > 0) {
-            this.withdrawBalance = getWithdrawBalance().add(amount);
+            this.lifetimeWithdraw = getLifetimeWithdraw().add(amount);
         }
     }
 
+    /** ৩. উত্তোলন বাতিল/রিজেক্ট হলে: টাকা ব্যালেন্সে ফেরত (টার্নওভার বদলায় না) */
+    public void refundWithdraw(BigDecimal amount) {
+        if (amount != null && amount.signum() > 0) {
+            this.balance = getBalance().add(amount);
+        }
+    }
+
+    /** জেতা টাকা যোগ হলে লাইফটাইম আয়ও বাড়ে (শুধু দেখানোর জন্য) */
     public void addLifetimeEarnings(BigDecimal amount) {
         if (amount != null && amount.signum() > 0) {
             this.lifetimeEarnings = getLifetimeEarnings().add(amount);
         }
+    }
+
+    // ---- পুরনো কোড যেন না ভাঙে (নতুন লজিকে ঘোরানো) ----
+
+    /** @deprecated addDeposit() ব্যবহার করুন। ডিপোজিট/বোনাস/রিফান্ড: ব্যালেন্স + টার্নওভার দুটোই বাড়ে */
+    @Deprecated
+    public void addToDepositBalance(BigDecimal amount) { addDeposit(amount); }
+
+    /** @deprecated addWinnings() ব্যবহার করুন। জেতা টাকা: শুধু ব্যালেন্স বাড়ে */
+    @Deprecated
+    public void addToWithdrawBalance(BigDecimal amount) { addWinnings(amount); }
+
+    /** @deprecated এখন একটাই ব্যালেন্স, getBalance() ব্যবহার করুন */
+    @Deprecated
+    @JsonIgnore
+    public BigDecimal getDepositBalance() { return getBalance(); }
+
+    /** @deprecated getWithdrawableBalance() ব্যবহার করুন */
+    @Deprecated
+    @JsonIgnore
+    public BigDecimal getWithdrawBalance() { return getWithdrawableBalance(); }
+
+    /** এই মুহূর্তে উত্তোলনযোগ্য টাকা (টার্নওভার বাকি থাকলে ০) */
+    @Transient
+    @JsonIgnore
+    public BigDecimal getWithdrawableBalance() {
+        return canWithdraw() ? getBalance() : BigDecimal.ZERO;
     }
 
     // ---------------- Device helper ----------------
@@ -175,17 +244,16 @@ public class User implements UserDetails {
     public String getGameId() { return gameId; }
     public void setGameId(String gameId) { this.gameId = gameId; }
 
-    // পাসওয়ার্ড হ্যাশ কখনো JSON রেসপন্সে যাবে না
     @Override
     @JsonIgnore
     public String getPassword() { return password; }
     public void setPassword(String password) { this.password = password; }
 
-    public BigDecimal getDepositBalance() { return depositBalance != null ? depositBalance : BigDecimal.ZERO; }
-    public void setDepositBalance(BigDecimal v) { this.depositBalance = v != null ? v : BigDecimal.ZERO; }
+    public BigDecimal getBalance() { return balance != null ? balance : BigDecimal.ZERO; }
+    public void setBalance(BigDecimal v) { this.balance = v != null ? v : BigDecimal.ZERO; }
 
-    public BigDecimal getWithdrawBalance() { return withdrawBalance != null ? withdrawBalance : BigDecimal.ZERO; }
-    public void setWithdrawBalance(BigDecimal v) { this.withdrawBalance = v != null ? v : BigDecimal.ZERO; }
+    public BigDecimal getTurnoverBalance() { return turnoverBalance != null ? turnoverBalance : BigDecimal.ZERO; }
+    public void setTurnoverBalance(BigDecimal v) { this.turnoverBalance = v != null ? v : BigDecimal.ZERO; }
 
     public BigDecimal getLifetimeEarnings() { return lifetimeEarnings != null ? lifetimeEarnings : BigDecimal.ZERO; }
     public void setLifetimeEarnings(BigDecimal v) { this.lifetimeEarnings = v != null ? v : BigDecimal.ZERO; }
@@ -281,7 +349,6 @@ public class User implements UserDetails {
     public void setTotalDevices(Integer totalDevices) { this.totalDevices = totalDevices; }
 
     // ---------------- UserDetails ----------------
-    // ✅ FIX: "ROLE_" প্রিফিক্স না থাকলে hasRole("ADMIN") কাজ করে না
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
         return List.of(new SimpleGrantedAuthority("ROLE_" + this.role.name()));
@@ -312,7 +379,9 @@ public class User implements UserDetails {
 
     @Override
     public String toString() {
-        return "User{id=" + id + ", gameId='" + gameId + "', depositBalance=" + depositBalance
-                + ", withdrawBalance=" + withdrawBalance + ", role=" + role + ", status=" + status + "}";
+        return "User{id=" + id + ", gameId='" + gameId + "', balance=" + balance
+                + ", turnoverBalance=" + turnoverBalance
+                + ", lifetimeWithdraw=" + lifetimeWithdraw
+                + ", role=" + role + ", status=" + status + "}";
     }
-    }
+}
