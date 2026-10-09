@@ -54,6 +54,13 @@ public class GameSession {
     @Column(name = "fee_deducted", nullable = false)
     private boolean feeDeducted = false;
 
+    // ফি কাটার সময় প্রতিজনের টার্নওভার আসলে কত কমেছিল (বাতিলে ঠিক ততটুকুই ফেরত যায়)
+    @Column(name = "turnover_cut_p1", nullable = false, precision = 19, scale = 2)
+    private BigDecimal turnoverCutP1 = BigDecimal.ZERO;
+
+    @Column(name = "turnover_cut_p2", nullable = false, precision = 19, scale = 2)
+    private BigDecimal turnoverCutP2 = BigDecimal.ZERO;
+
     // ---------------- Business helpers ----------------
 
     /** entryFee অনুযায়ী প্রাইজ (totalPot) সেট করে */
@@ -81,6 +88,17 @@ public class GameSession {
         if (player1 != null && player1.getGameId().equals(gameId)) return 1;
         if (player2 != null && player2.getGameId().equals(gameId)) return 2;
         throw new IllegalArgumentException("You are not a player of this game");
+    }
+
+    /** স্লট (১ বা ২) অনুযায়ী ফি কাটার সময় টার্নওভার কত কমেছিল */
+    public BigDecimal getTurnoverCut(int slot) {
+        BigDecimal v = slot == 1 ? turnoverCutP1 : turnoverCutP2;
+        return v != null ? v : BigDecimal.ZERO;
+    }
+
+    public void setTurnoverCut(int slot, BigDecimal v) {
+        BigDecimal x = v != null ? v : BigDecimal.ZERO;
+        if (slot == 1) turnoverCutP1 = x; else turnoverCutP2 = x;
     }
 
     // ---------------- Getters & Setters ----------------
