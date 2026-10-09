@@ -38,15 +38,30 @@ public interface UserService {
     long countUsers();
 
     // ================== Balance & Earnings ==================
+    /** একটাই মোট ব্যালেন্স */
     BigDecimal getBalance(String gameId);
+    /** অ্যাডমিন: সরাসরি ব্যালেন্স সেট */
     void setBalance(String gameId, BigDecimal newBalance);
+    /** ডিপোজিট/বোনাস: ব্যালেন্স + টার্নওভার দুটোই বাড়ে */
     void addBalance(String gameId, BigDecimal amount);
+    /** এন্ট্রি ফি: ব্যালেন্স কমে + টার্নওভার ১০০% কমে */
     void deductBalance(String gameId, BigDecimal amount);
+    /** উত্তোলনযোগ্য টাকা (টার্নওভার বাকি থাকলে ০) */
     BigDecimal getWithdrawBalance(String gameId);
+    /** জেতা টাকা: শুধু ব্যালেন্স বাড়ে */
     void addWithdrawBalance(String gameId, BigDecimal amount);
+    BigDecimal getTurnoverBalance(String gameId);
     BigDecimal getLifetimeEarnings(String gameId);
+    BigDecimal getLifetimeWithdraw(String gameId);
     void addToLifetimeEarnings(String gameId, BigDecimal amount);
+    /** শুধু উত্তোলন সফল (অ্যাডমিন অ্যাপ্রুভ) হলে কল করুন */
     void addLifetimeWithdraw(String gameId, BigDecimal amount);
+
+    // ================== Withdraw flow ==================
+    /** রিকোয়েস্ট দিলে: টার্নওভার ০ কিনা চেক করে ব্যালেন্স কাটে */
+    void holdForWithdraw(String gameId, BigDecimal amount);
+    /** রিজেক্ট/বাতিল হলে: টাকা ব্যালেন্সে ফেরত */
+    void refundWithdraw(String gameId, BigDecimal amount);
 
     // ================== Credit Balance (for MatchService) ==================
     void creditBalance(User user, BigDecimal amount);
