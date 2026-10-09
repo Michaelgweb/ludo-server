@@ -19,7 +19,10 @@ import java.util.Optional;
 
 /**
  * ম্যাচমেকিং। এখানে শুধু ব্যালেন্স চেক হয়, টাকা কাটা হয় না।
- * (ফি কাটা হয় GameFlowService.rollDice এ, প্রথম রোলের সময়)
+ * (ফি কাটা হয় GameFlowService.rollDice এ, প্রথম রোলের সময়, user.deduct() দিয়ে:
+ *  ব্যালেন্স কমে + টার্নওভার ১০০% কমে)
+ *
+ * ব্যালেন্স এখন একটাই (ডিপোজিট + জেতা টাকা মিলিয়ে), তাই চেক হয় getBalance() দিয়ে।
  */
 @Service
 public class MatchService {
@@ -79,10 +82,11 @@ public class MatchService {
             if (opt.isEmpty()) break;
 
             MatchRequest req = opt.get();
-            User opponent = req.getUser();
             requests.delete(req);                       // রিকোয়েস্ট ব্যবহার হয়ে গেছে
 
-            // অপেক্ষার সময়ে প্রতিপক্ষের অবস্থা বদলে থাকতে পারে
+            // অপেক্ষার সময়ে প্রতিপক্ষের ব্যালেন্স/অবস্থা বদলে থাকতে পারে, তাই নতুন করে আনি
+            User opponent = users.findById(req.getUser().getId()).orElse(null);
+            if (opponent == null) continue;
             if (opponent.getBalance().compareTo(entryFee) < 0) continue;
             if (hasActiveSession(opponent)) continue;
 
