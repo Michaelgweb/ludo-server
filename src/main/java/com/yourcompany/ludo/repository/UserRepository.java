@@ -34,19 +34,9 @@ public interface UserRepository extends JpaRepository<User, Long> {
     @Query("SELECT u FROM User u WHERE u.referralCode = :referralCode")
     Optional<User> findByReferralCodeForUpdate(@Param("referralCode") String referralCode);
 
-    // ---------------- Balance & Earnings Updates by gameId ----------------
-    // ⚠️ এগুলো ব্যালেন্স "সেট" করে (যোগ/বিয়োগ নয়)। গেমের টাকা লেনদেনে ব্যবহার করবেন না,
-    // শুধু অ্যাডমিন/ডিপোজিট কাজে, আর আগে findByGameIdForUpdate দিয়ে লক নিন।
-    @Modifying
-    @Transactional
-    @Query("UPDATE User u SET u.depositBalance = :depositBalance WHERE u.gameId = :gameId")
-    int updateDepositBalanceByGameId(@Param("gameId") String gameId, @Param("depositBalance") BigDecimal depositBalance);
-
-    @Modifying
-    @Transactional
-    @Query("UPDATE User u SET u.withdrawBalance = :withdrawBalance WHERE u.gameId = :gameId")
-    int updateWithdrawBalanceByGameId(@Param("gameId") String gameId, @Param("withdrawBalance") BigDecimal withdrawBalance);
-
+    // ---------------- Earnings Updates by gameId ----------------
+    // ব্যালেন্স/টার্নওভার সরাসরি UPDATE কোয়েরিতে বদলানো বন্ধ। সেগুলো User.addDeposit(),
+    // addWinnings(), deduct(), holdForWithdraw() ইত্যাদি মেথডে হয় (লক নিয়ে, UserService দিয়ে)।
     @Modifying
     @Transactional
     @Query("UPDATE User u SET u.lifetimeEarnings = :amount WHERE u.gameId = :gameId")
