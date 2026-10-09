@@ -225,10 +225,17 @@ public class DepositService {
         return d;
     }
 
-    /** ব্যালেন্স যোগ + status APPROVED (কলারকে অবশ্যই transaction-এর ভেতরে থাকতে হবে) */
+    /**
+     * ব্যালেন্স + টার্নওভার যোগ (addDeposit) + status APPROVED।
+     * কলারকে অবশ্যই transaction-এর ভেতরে থাকতে হবে।
+     */
     private void approveInternal(DepositRequest d, Long adminId, boolean auto) {
         User u = em.find(User.class, d.getUser().getId(), LockModeType.PESSIMISTIC_WRITE);
-        u.addToDepositBalance(d.getAmount());
+        if (u == null) throw err(HttpStatus.NOT_FOUND, "User not found");
+        // পারসিস্টেন্স কনটেক্সটে আগে থেকে থাকলে ব্যালেন্স stale হতে পারে, তাই DB থেকে নতুন করে আনি
+        em.refresh(u, LockModeType.PESSIMISTIC_WRITE);
+
+        u.addDeposit(d.getAmount());                 // ব্যালেন্সও বাড়ে, টার্নওভারও সমান বাড়ে
 
         d.setStatus(Status.APPROVED);
         d.setAutoApproved(auto);
@@ -247,6 +254,7 @@ public class DepositService {
      * TODO: ডিপোজিট অ্যাপ্রুভ হলে যা যা হবে সেই বোনাস লজিক এখানে বসবে
      * (first-deposit বোনাস, রেফারারের PENDING বোনাস COMPLETED করা ইত্যাদি)।
      * এই মেথড approveInternal-এর transaction-এর ভেতরেই চলে।
+     * বোনাস দিলে u.addDeposit(...) ব্যবহার করুন (ব্যালেন্স + টার্নওভার দুটোই বাড়বে)।
      */
     private void onDepositApproved(User user, DepositRequest deposit) {
         // এখনো কোনো বোনাস নেই
