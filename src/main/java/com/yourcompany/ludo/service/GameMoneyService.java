@@ -10,6 +10,8 @@ import com.yourcompany.ludo.repository.WalletTransactionRepository;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.PersistenceContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,23 +33,30 @@ import java.util.Map;
  *  - ফি কাটা: ব্যালেন্স কমে + টার্নওভার ১০০% কমে (User.deduct), আসলে কত কমল তা GameSession এ সেভ হয়
  *  - জেতা টাকা: শুধু ব্যালেন্স বাড়ে, টার্নওভার বাড়ে না (User.addWinnings)
  *  - বাতিল/রিফান্ড: ব্যালেন্স পুরো ফেরত, টার্নওভার শুধু যতটুকু কমেছিল ততটুকু ফেরত (User.refundEntryFee)
+ *
+ * টেলিগ্রাম: টাকার মেসেজ এখানেই যায় (কমিটের পরে, async)। ফেল করলেও টাকার কাজে প্রভাব নেই।
  */
 @Service
 public class GameMoneyService {
 
+    private static final Logger log = LoggerFactory.getLogger(GameMoneyService.class);
+
     private final GameSessionRepository sessions;
     private final WalletTransactionRepository wallet;
     private final SimpMessagingTemplate ws;
+    private final TelegramService telegram;
 
     @PersistenceContext
     private EntityManager em;
 
     public GameMoneyService(GameSessionRepository sessions,
                             WalletTransactionRepository wallet,
-                            SimpMessagingTemplate ws) {
+                            SimpMessagingTemplate ws,
+                            TelegramService telegram) {
         this.sessions = sessions;
         this.wallet = wallet;
         this.ws = ws;
+        this.telegram = telegram;
     }
 
     public record Snapshot(GameStatus status, int slot, String winnerGameId) {}
@@ -83,6 +92,12 @@ public class GameMoneyService {
         BigDecimal fee = s.getEntryFee();
         if (ps[0].getBalance().compareTo(fee) < 0 || ps[1].getBalance().compareTo(fee) < 0) {
             close(s, GameStatus.CANCELLED, "ব্যালেন্স অপর্যাপ্ত, ম্যাচ বাতিল");
+            telegramAfterCommit("❌ ম্যাচ বাতিল (ব্যালেন্স অপর্যাপ্ত)\n"
+                    + "Session: " + s.getId() + "\n"
+                    + "Player 1: " + ps[0].getGameId() + "\n"
+                    + "Player 2: " + ps[1].getGameId() + "\n"
+                    + "Entry Fee: " + fee + " টাকা\n"
+                    + "Status: CANCELLED");
             return false;
         }
         for (int i = 0; i < 2; i++) {
@@ -92,6 +107,14 @@ public class GameMoneyService {
         }
         s.setFeeDeducted(true);
         s.setFirstRollAt(LocalDateTime.now());
+
+        telegramAfterCommit("💰 এন্ট্রি ফি কাটা হয়েছে\n"
+                + "Session: " + s.getId() + "\n"
+                + "Player 1: " + ps[0].getGameId() + "\n"
+                + "Player 2: " + ps[1].getGameId() + "\n"
+                + "প্রতি জন: " + fee + " টাকা\n"
+                + "Total Pot: " + s.getTotalPot() + " টাকা\n"
+                + "Status: ONGOING");
         return true;
     }
 
@@ -102,8 +125,20 @@ public class GameMoneyService {
         if (s.getStatus() != GameStatus.ONGOING) return;
         if (!s.isFeeDeducted()) throw new IllegalStateException("Fee not deducted");
         User winner = winnerSlot == 1 ? s.getPlayer1() : s.getPlayer2();
+        User loser = winnerSlot == 1 ? s.getPlayer2() : s.getPlayer1();
         payWinner(s, winner);
         close(s, GameStatus.FINISHED, msg);
+
+        telegramAfterCommit("🏆 ম্যাচ শেষ\n"
+                + "Session: " + s.getId() + "\n"
+                + "বিজয়ী: " + winner.getGameId() + "\n"
+                + "পরাজিত: " + loser.getGameId() + "\n"
+                + "Entry Fee: " + s.getEntryFee() + " টাকা\n"
+                + "Total Pot: " + s.getTotalPot() + " টাকা\n"
+                + "বিজয়ী পেয়েছে: " + s.getTotalPot() + " টাকা\n"
+                + "কমিশন: " + s.getCommission() + " টাকা\n"
+                + "কারণ: " + msg + "\n"
+                + "Status: FINISHED");
     }
 
     /** ফি কাটা থাকলে দুজনকে ফেরত, তারপর বাতিল */
@@ -111,13 +146,23 @@ public class GameMoneyService {
     public void refundAndCancel(Long sid, String msg) {
         GameSession s = lock(sid);
         if (s.getStatus() != GameStatus.ONGOING) return;
-        if (s.isFeeDeducted()) refundBoth(s);
+        boolean refunded = s.isFeeDeducted();
+        if (refunded) refundBoth(s);
         close(s, GameStatus.CANCELLED, msg);
+
+        telegramAfterCommit((refunded ? "🔄 ম্যাচ বাতিল (ফি ফেরত)" : "🚫 ম্যাচ বাতিল") + "\n"
+                + "Session: " + s.getId() + "\n"
+                + "Player 1: " + s.getPlayer1().getGameId() + "\n"
+                + "Player 2: " + s.getPlayer2().getGameId() + "\n"
+                + (refunded ? "ফেরত: প্রতি জনকে " + s.getEntryFee() + " টাকা\n" : "")
+                + "কারণ: " + msg + "\n"
+                + "Status: CANCELLED");
     }
 
     /**
      * ফি কাটা না হয়ে থাকলে (MATCH_FOUND বা ONGOING) শুধু বাতিল। বাতিল হলে true।
      * onlyPlayerGameId দিলে ওই খেলোয়াড় ম্যাচের সদস্য কিনা যাচাই হয়।
+     * (এর টেলিগ্রাম মেসেজ GameFlowService-এ আছে, এখানে নেই)
      */
     @Transactional
     public boolean cancelIfIdle(Long sid, String onlyPlayerGameId, String msg) {
@@ -192,16 +237,30 @@ public class GameMoneyService {
     private void notifyBoth(GameSession s, Map<String, Object> payload) {
         String g1 = s.getPlayer1().getGameId();
         String g2 = s.getPlayer2().getGameId();
-        Runnable send = () -> {
+        afterCommit(() -> {
             ws.convertAndSend("/topic/game/" + g1, payload);
             ws.convertAndSend("/topic/game/" + g2, payload);
-        };
+        });
+    }
+
+    /** টেলিগ্রাম: কমিটের পরে, ফেল করলেও টাকার কাজে প্রভাব নেই */
+    private void telegramAfterCommit(String text) {
+        afterCommit(() -> {
+            try {
+                telegram.send(text);
+            } catch (Exception e) {
+                log.warn("Telegram notify failed: {}", e.getMessage());
+            }
+        });
+    }
+
+    private void afterCommit(Runnable r) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override public void afterCommit() { send.run(); }
+                @Override public void afterCommit() { r.run(); }
             });
         } else {
-            send.run();
+            r.run();
         }
     }
-}
+            }
