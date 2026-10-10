@@ -34,4 +34,26 @@ public interface DepositRequestRepository extends JpaRepository<DepositRequest, 
     @Override
     @EntityGraph(attributePaths = "user")
     Page<DepositRequest> findAll(Pageable pageable);
+
+    /** অ্যাডমিন সার্চ: gameId, মোবাইল, সার্ভার ID (DEP...), ইউজারের TrxID */
+    @EntityGraph(attributePaths = "user")
+    @Query(value = """
+            select d from DepositRequest d join d.user u
+            where (:status is null or d.status = :status)
+              and (lower(u.gameId) like lower(concat('%', :q, '%'))
+                or u.mobile like concat('%', :q, '%')
+                or upper(d.transactionId) like upper(concat('%', :q, '%'))
+                or upper(d.userTransactionId) like upper(concat('%', :q, '%')))
+            """,
+            countQuery = """
+            select count(d) from DepositRequest d join d.user u
+            where (:status is null or d.status = :status)
+              and (lower(u.gameId) like lower(concat('%', :q, '%'))
+                or u.mobile like concat('%', :q, '%')
+                or upper(d.transactionId) like upper(concat('%', :q, '%'))
+                or upper(d.userTransactionId) like upper(concat('%', :q, '%')))
+            """)
+    Page<DepositRequest> search(@Param("q") String q,
+                                @Param("status") Status status,
+                                Pageable pageable);
 }
