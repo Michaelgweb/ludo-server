@@ -34,6 +34,7 @@ import java.util.Map;
  *  - জেতা টাকা: শুধু ব্যালেন্স বাড়ে, টার্নওভার বাড়ে না (User.addWinnings)
  *  - বাতিল/রিফান্ড: ব্যালেন্স পুরো ফেরত, টার্নওভার শুধু যতটুকু কমেছিল ততটুকু ফেরত (User.refundEntryFee)
  *
+ * লাইভ আপডেট: টাকা বদলালে কমিটের পরে দুজনের প্রোফাইল (ব্যালেন্স + টার্নওভার) WebSocket এ যায়।
  * টেলিগ্রাম: টাকার মেসেজ এখানেই যায় (কমিটের পরে, async)। ফেল করলেও টাকার কাজে প্রভাব নেই।
  */
 @Service
@@ -45,6 +46,7 @@ public class GameMoneyService {
     private final WalletTransactionRepository wallet;
     private final SimpMessagingTemplate ws;
     private final TelegramService telegram;
+    private final UserService userService;
 
     @PersistenceContext
     private EntityManager em;
@@ -52,11 +54,13 @@ public class GameMoneyService {
     public GameMoneyService(GameSessionRepository sessions,
                             WalletTransactionRepository wallet,
                             SimpMessagingTemplate ws,
-                            TelegramService telegram) {
+                            TelegramService telegram,
+                            UserService userService) {
         this.sessions = sessions;
         this.wallet = wallet;
         this.ws = ws;
         this.telegram = telegram;
+        this.userService = userService;
     }
 
     public record Snapshot(GameStatus status, int slot, String winnerGameId) {}
@@ -108,6 +112,8 @@ public class GameMoneyService {
         s.setFeeDeducted(true);
         s.setFirstRollAt(LocalDateTime.now());
 
+        refreshProfilesAfterCommit(ps[0], ps[1]);        // টার্নওভার/ব্যালেন্স লাইভ কমবে
+
         telegramAfterCommit("💰 এন্ট্রি ফি কাটা হয়েছে\n"
                 + "Session: " + s.getId() + "\n"
                 + "Player 1: " + ps[0].getGameId() + "\n"
@@ -129,6 +135,8 @@ public class GameMoneyService {
         payWinner(s, winner);
         close(s, GameStatus.FINISHED, msg);
 
+        refreshProfilesAfterCommit(winner, loser);
+
         telegramAfterCommit("🏆 ম্যাচ শেষ\n"
                 + "Session: " + s.getId() + "\n"
                 + "বিজয়ী: " + winner.getGameId() + "\n"
@@ -147,7 +155,10 @@ public class GameMoneyService {
         GameSession s = lock(sid);
         if (s.getStatus() != GameStatus.ONGOING) return;
         boolean refunded = s.isFeeDeducted();
-        if (refunded) refundBoth(s);
+        if (refunded) {
+            refundBoth(s);
+            refreshProfilesAfterCommit(s.getPlayer1(), s.getPlayer2());
+        }
         close(s, GameStatus.CANCELLED, msg);
 
         telegramAfterCommit((refunded ? "🔄 ম্যাচ বাতিল (ফি ফেরত)" : "🚫 ম্যাচ বাতিল") + "\n"
@@ -243,6 +254,20 @@ public class GameMoneyService {
         });
     }
 
+    /** কমিটের পরে দুজনের প্রোফাইল পুশ (ব্যালেন্স + টার্নওভার), ফেল করলেও টাকার কাজে প্রভাব নেই */
+    private void refreshProfilesAfterCommit(User a, User b) {
+        String g1 = a.getGameId();
+        String g2 = b.getGameId();
+        afterCommit(() -> {
+            try {
+                userService.notifyUserUpdate(g1);
+                userService.notifyUserUpdate(g2);
+            } catch (Exception e) {
+                log.warn("Profile refresh failed: {}", e.getMessage());
+            }
+        });
+    }
+
     /** টেলিগ্রাম: কমিটের পরে, ফেল করলেও টাকার কাজে প্রভাব নেই */
     private void telegramAfterCommit(String text) {
         afterCommit(() -> {
@@ -263,4 +288,4 @@ public class GameMoneyService {
             r.run();
         }
     }
-            }
+}
