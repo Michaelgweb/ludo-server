@@ -1,114 +1,70 @@
-package com.yourcompany.ludo.controller;
+package com.yourcompany.ludo.service;
 
-import com.yourcompany.ludo.model.User;
-import com.yourcompany.ludo.service.UserService;
-import com.yourcompany.ludo.service.UserWalletService;
-import com.yourcompany.ludo.service.UserWalletService.WalletDto;
+import com.yourcompany.ludo.model.UserWallet;
+import com.yourcompany.ludo.repository.UserRepository;
+import com.yourcompany.ludo.repository.UserWalletRepository;
+import com.yourcompany.ludo.util.PaymentRules;
 import org.springframework.http.HttpStatus;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
-@RestController
-@RequestMapping("/api/wallets")
-public class UserWalletController {
+@Service
+public class UserWalletService {
 
-    // ভুল পাসওয়ার্ড দিয়ে অনুমান ঠেকাতে: ৫ বার ভুল হলে ১৫ মিনিট নম্বর অ্যাড বন্ধ।
-    // মেমোরিতে রাখা হয় (সার্ভার রিস্টার্টে রিসেট হয়)
-    private static final int MAX_PASSWORD_ATTEMPTS = 5;
-    private static final long PASSWORD_LOCK_MILLIS = 15 * 60 * 1000L;
-    private final Map<Long, long[]> passwordAttempts = new ConcurrentHashMap<>(); // [ভুলের সংখ্যা, লক শেষের সময়]
+    public static final int MAX_WALLETS = 5;
 
-    // একই ইউজারের দুই রিকোয়েস্ট একসাথে এলেও সীমা পার না হওয়ার জন্য
-    private final Map<Long, Object> userLocks = new ConcurrentHashMap<>();
+    public record WalletDto(Long id, String method, String number) {}
 
-    public record AddWalletRequest(String method, String number, String password) {}
+    private final UserWalletRepository walletRepository;
+    private final UserRepository userRepository;
 
-    private final UserWalletService service;
-    private final UserService userService;
-    private final PasswordEncoder passwordEncoder;
-
-    public UserWalletController(UserWalletService service,
-                                UserService userService,
-                                PasswordEncoder passwordEncoder) {
-        this.service = service;
-        this.userService = userService;
-        this.passwordEncoder = passwordEncoder;
+    public UserWalletService(UserWalletRepository walletRepository, UserRepository userRepository) {
+        this.walletRepository = walletRepository;
+        this.userRepository = userRepository;
     }
 
-    // ---------------- helpers ----------------
-
-    /** লক চললে কত মিনিট বাকি (না থাকলে ০) */
-    private long lockMinutesLeft(Long userId) {
-        long[] st = passwordAttempts.get(userId);
-        if (st == null) return 0;
-        long left = st[1] - System.currentTimeMillis();
-        return left > 0 ? (left + 59_999) / 60_000 : 0;
+    @Transactional(readOnly = true)
+    public List<WalletDto> list(Long userId) {
+        return walletRepository.findByUserIdOrderByCreatedAtAsc(userId).stream()
+                .map(w -> new WalletDto(w.getId(), w.getMethod(), w.getNumber()))
+                .toList();
     }
 
-    private void recordWrongPassword(Long userId) {
-        passwordAttempts.compute(userId, (k, st) -> {
-            long now = System.currentTimeMillis();
-            if (st == null || (st[1] != 0 && st[1] <= now)) st = new long[]{0, 0};
-            st[0]++;
-            if (st[0] >= MAX_PASSWORD_ATTEMPTS) {
-                st[1] = now + PASSWORD_LOCK_MILLIS;
-                st[0] = 0;
-            }
-            return st;
-        });
-    }
+    @Transactional
+    public WalletDto add(Long userId, String method, String number) {
+        String m = PaymentRules.normalizeMethod(method);
+        String n = PaymentRules.normalizeNumber(number);
 
-    /** ডাটাবেস থেকে সর্বশেষ ইউজার এনে পাসওয়ার্ড মেলানো */
-    private void verifyPassword(User principal, String password) {
-        if (password == null || password.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "আপনার লগইন পাসওয়ার্ড দিন");
+        if (walletRepository.countByUserId(userId) >= MAX_WALLETS) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "সর্বোচ্চ " + MAX_WALLETS + "টি ওয়ালেট যোগ করা যাবে");
+        }
+        if (walletRepository.existsByUserIdAndMethodAndNumber(userId, m, n)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "এই ওয়ালেট আগেই যোগ করা আছে");
         }
 
-        long lockMinutes = lockMinutesLeft(principal.getId());
-        if (lockMinutes > 0) {
-            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
-                    "অনেকবার ভুল পাসওয়ার্ড দিয়েছেন। " + lockMinutes + " মিনিট পরে চেষ্টা করুন");
-        }
-
-        User fresh = userService.findByGameId(principal.getGameId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Unauthorized"));
-
-        if (!passwordEncoder.matches(password, fresh.getPassword())) {
-            recordWrongPassword(principal.getId());
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "পাসওয়ার্ড ভুল");
-        }
-        passwordAttempts.remove(principal.getId());
+        UserWallet w = new UserWallet();
+        w.setUser(userRepository.getReferenceById(userId));
+        w.setMethod(m);
+        w.setNumber(n);
+        w = walletRepository.save(w);
+        return new WalletDto(w.getId(), w.getMethod(), w.getNumber());
     }
 
-    // ---------------- endpoints ----------------
-
-    @GetMapping
-    public List<WalletDto> myWallets(@AuthenticationPrincipal User user) {
-        return service.list(user.getId());
+    @Transactional
+    public void delete(Long userId, Long walletId) {
+        UserWallet w = walletRepository.findByIdAndUserId(walletId, userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Wallet not found"));
+        walletRepository.delete(w);
     }
 
-    @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public WalletDto add(@AuthenticationPrincipal User user, @RequestBody AddWalletRequest req) {
-        // ১. পাসওয়ার্ড যাচাই
-        verifyPassword(user, req.password());
-
-        // ২. সর্বোচ্চ ৫টার সীমা UserWalletService.add() এ চেক হয়।
-        //    একই ইউজারের দুই রিকোয়েস্ট একসাথে এলে যেন সীমা পার না হয়, তাই ইউজার-ভিত্তিক লক
-        synchronized (userLocks.computeIfAbsent(user.getId(), k -> new Object())) {
-            return service.add(user.getId(), req.method(), req.number());
-        }
-    }
-
-    @DeleteMapping("/{id}")
-    public Map<String, Object> delete(@AuthenticationPrincipal User user, @PathVariable Long id) {
-        service.delete(user.getId(), id);
-        return Map.of("success", true);
+    /** উইথড্রর সময় রিসিভার নম্বর ইউজারের নিজের ওয়ালেটের কিনা চেক করতে */
+    @Transactional(readOnly = true)
+    public boolean owns(Long userId, String method, String number) {
+        return walletRepository.existsByUserIdAndMethodAndNumber(
+                userId, PaymentRules.normalizeMethod(method), PaymentRules.normalizeNumber(number));
     }
 }
