@@ -5,6 +5,7 @@ import com.yourcompany.ludo.service.UserService;
 import com.yourcompany.ludo.service.UserWalletService;
 import com.yourcompany.ludo.service.UserWalletService.WalletDto;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
@@ -18,16 +19,13 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequestMapping("/api/wallets")
 public class UserWalletController {
 
-    /** একজন ইউজার সর্বোচ্চ কয়টা নম্বর সেভ করতে পারবে */
-    private static final int MAX_WALLETS = 5;
-
     // ভুল পাসওয়ার্ড দিয়ে অনুমান ঠেকাতে: ৫ বার ভুল হলে ১৫ মিনিট নম্বর অ্যাড বন্ধ।
     // মেমোরিতে রাখা হয় (সার্ভার রিস্টার্টে রিসেট হয়)
     private static final int MAX_PASSWORD_ATTEMPTS = 5;
     private static final long PASSWORD_LOCK_MILLIS = 15 * 60 * 1000L;
     private final Map<Long, long[]> passwordAttempts = new ConcurrentHashMap<>(); // [ভুলের সংখ্যা, লক শেষের সময়]
 
-    // একই ইউজারের দুই রিকোয়েস্ট একসাথে এলেও ৫ এর বেশি না হওয়ার জন্য
+    // একই ইউজারের দুই রিকোয়েস্ট একসাথে এলেও সীমা পার না হওয়ার জন্য
     private final Map<Long, Object> userLocks = new ConcurrentHashMap<>();
 
     public record AddWalletRequest(String method, String number, String password) {}
@@ -44,7 +42,31 @@ public class UserWalletController {
         this.passwordEncoder = passwordEncoder;
     }
 
+    // ---------------- errors ----------------
+    // Spring Boot 3 ডিফল্টে ResponseStatusException এর মেসেজ রেসপন্সে পাঠায় না,
+    // তাই অ্যাপ কারণ দেখতে পেত না। এখানে সবসময় {"message": "...", "error": "..."} যায়।
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<Map<String, Object>> handleStatus(ResponseStatusException e) {
+        String msg = e.getReason() != null ? e.getReason() : "Request failed";
+        return ResponseEntity.status(e.getStatusCode())
+                .body(Map.of("message", msg, "error", msg));
+    }
+
+    @ExceptionHandler({IllegalArgumentException.class, IllegalStateException.class})
+    public ResponseEntity<Map<String, Object>> handleBadInput(RuntimeException e) {
+        String msg = e.getMessage() != null ? e.getMessage() : "Invalid request";
+        return ResponseEntity.badRequest().body(Map.of("message", msg, "error", msg));
+    }
+
     // ---------------- helpers ----------------
+
+    private User requireUser(User user) {
+        if (user == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Unauthorized");
+        }
+        return user;
+    }
 
     /** লক চললে কত মিনিট বাকি (না থাকলে ০) */
     private long lockMinutesLeft(Long userId) {
@@ -93,28 +115,31 @@ public class UserWalletController {
 
     @GetMapping
     public List<WalletDto> myWallets(@AuthenticationPrincipal User user) {
-        return service.list(user.getId());
+        return service.list(requireUser(user).getId());
     }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public WalletDto add(@AuthenticationPrincipal User user, @RequestBody AddWalletRequest req) {
+        requireUser(user);
+
+        if (req == null || req.method() == null || req.number() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "method ও number দিন");
+        }
+
         // ১. পাসওয়ার্ড যাচাই
         verifyPassword(user, req.password());
 
-        // ২. সর্বোচ্চ ৫টা (লকের ভেতরে গুনে অ্যাড করা হয়)
+        // ২. সর্বোচ্চ ৫টার সীমা UserWalletService.add() এ চেক হয়।
+        //    একই ইউজারের দুই রিকোয়েস্ট একসাথে এলে যেন সীমা পার না হয়, তাই ইউজার-ভিত্তিক লক
         synchronized (userLocks.computeIfAbsent(user.getId(), k -> new Object())) {
-            if (service.list(user.getId()).size() >= MAX_WALLETS) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                        "সর্বোচ্চ " + MAX_WALLETS + "টা নম্বর অ্যাড করা যাবে। নতুন নম্বর দিতে আগে একটা মুছে ফেলুন");
-            }
             return service.add(user.getId(), req.method(), req.number());
         }
     }
 
     @DeleteMapping("/{id}")
     public Map<String, Object> delete(@AuthenticationPrincipal User user, @PathVariable Long id) {
-        service.delete(user.getId(), id);
+        service.delete(requireUser(user).getId(), id);
         return Map.of("success", true);
     }
 }
