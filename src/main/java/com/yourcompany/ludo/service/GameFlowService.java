@@ -10,6 +10,8 @@ import java.security.SecureRandom;
 /**
  * গেমের প্রবাহ: রোল, টাইমার, বের হওয়া। চলমান স্টেট Redis-এ, টাকার কাজ GameMoneyService-এ (DB)।
  * প্রতিটি মেথড গেম-লকের ভেতরে চলে, তাই একই গেমে দুটো কাজ একসাথে হয় না।
+ *
+ * টেলিগ্রাম: টাকার মেসেজ GameMoneyService থেকে যায়। এখানে শুধু টাকা-ছাড়া ঘটনা (শুরু/শুরুর আগে বাতিল)।
  */
 @Service
 public class GameFlowService {
@@ -77,7 +79,7 @@ public class GameFlowService {
     }
 
     // =====================================================================
-    // 2) ডাইস রোল। প্রথম রোলে দুজনের ফি কাটে
+    // 2) ডাইস রোল। প্রথম রোলে দুজনের ফি কাটে (মেসেজ GameMoneyService থেকে)
     // =====================================================================
     public RollResult rollDice(Long sid, String gameId) {
         return lock.with(sid, () -> {
@@ -98,22 +100,10 @@ public class GameFlowService {
         if (!s.feeDeducted) {
             if (!money.chargeEntryFee(s.id)) {              // DB: ব্যালেন্স কম, বাতিল হয়েছে
                 store.delete(s.id);
-                notifyTelegram("❌ ম্যাচ বাতিল\n"
-                        + "Session: " + s.id + "\n"
-                        + "Player 1: " + s.g1 + "\n"
-                        + "Player 2: " + s.g2 + "\n"
-                        + "কারণ: ব্যালেন্স অপর্যাপ্ত\n"
-                        + "Status: CANCELLED");
                 return new RollResult(0, true, "Insufficient balance", me, s.currentPlayer, false);
             }
             s.feeDeducted = true;
             s.firstRollAt = System.currentTimeMillis();
-
-            notifyTelegram("💰 এন্ট্রি ফি কাটা হয়েছে\n"
-                    + "Session: " + s.id + "\n"
-                    + "Player 1: " + s.g1 + "\n"
-                    + "Player 2: " + s.g2 + "\n"
-                    + "Status: ONGOING");
         }
 
         int[] mine = s.tokens(me);
@@ -164,12 +154,6 @@ public class GameFlowService {
                 if (s.feeDeducted && now - s.firstRollAt > FIRST_ROLL_TIMEOUT_MS) {
                     money.refundAndCancel(sid, "প্রতিপক্ষ রোল না করায় ম্যাচ বাতিল, ফি ফেরত");
                     store.delete(sid);
-                    notifyTelegram("🔄 ম্যাচ বাতিল (ফি ফেরত)\n"
-                            + "Session: " + sid + "\n"
-                            + "Player 1: " + s.g1 + "\n"
-                            + "Player 2: " + s.g2 + "\n"
-                            + "কারণ: প্রতিপক্ষ রোল করেনি\n"
-                            + "Status: CANCELLED");
                     return Expired.none();
                 }
                 s.deadline = now + TURN_MS;
@@ -229,29 +213,12 @@ public class GameFlowService {
 
     /** leaver হারে। কেউ রোল না করলে বাতিল, একজন করলে রিফান্ড, দুজন করলে প্রতিপক্ষ জেতে */
     private void quit(GameState s, int leaver, String loseMsg) {
-        String leaverId = leaver == 1 ? s.g1 : s.g2;
-        String otherId = leaver == 1 ? s.g2 : s.g1;
-
         if (!s.feeDeducted) {
             money.refundAndCancel(s.id, "ম্যাচ বাতিল");
-            notifyTelegram("🚫 ম্যাচ বাতিল\n"
-                    + "Session: " + s.id + "\n"
-                    + "বের হয়েছে: " + leaverId + "\n"
-                    + "Status: CANCELLED");
         } else if (!s.bothRolled()) {
             money.refundAndCancel(s.id, "ম্যাচ বাতিল, ফি ফেরত দেওয়া হয়েছে");
-            notifyTelegram("🔄 ম্যাচ বাতিল (ফি ফেরত)\n"
-                    + "Session: " + s.id + "\n"
-                    + "বের হয়েছে: " + leaverId + "\n"
-                    + "Status: CANCELLED");
         } else {
             money.payout(s.id, leaver == 1 ? 2 : 1, loseMsg);
-            notifyTelegram("🏆 ম্যাচ শেষ\n"
-                    + "Session: " + s.id + "\n"
-                    + "বিজয়ী: " + otherId + "\n"
-                    + "পরাজিত: " + leaverId + "\n"
-                    + "কারণ: " + loseMsg + "\n"
-                    + "Status: FINISHED");
         }
         store.delete(s.id);
     }
