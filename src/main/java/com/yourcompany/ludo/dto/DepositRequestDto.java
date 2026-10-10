@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 public record DepositRequestDto(
         Long id,
         String gameId,
+        String mobile,
         BigDecimal amount,
         String method,
         String paymentAccountNumber,
@@ -23,6 +24,7 @@ public record DepositRequestDto(
         return new DepositRequestDto(
                 d.getId(),
                 d.getUser() != null ? d.getUser().getGameId() : null,
+                d.getUser() != null ? d.getUser().getMobile() : null,
                 d.getAmount(), d.getMethod(), d.getPaymentAccountNumber(),
                 d.getTransactionId(), d.getUserTransactionId(),
                 d.getStatus().name(), d.isAutoApproved(), d.getNote(),
