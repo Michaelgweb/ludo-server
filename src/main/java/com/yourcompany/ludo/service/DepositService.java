@@ -42,10 +42,7 @@ public class DepositService {
     private static final BigDecimal MAX = new BigDecimal("500000.00");
     private static final SecureRandom RND = new SecureRandom();
 
-    /** একজন ইউজারের একসাথে সর্বোচ্চ কতটা TrxID-ছাড়া pending ডিপোজিট থাকতে পারবে */
     private static final long MAX_OPEN_UNSUBMITTED = 3;
-
-    /** submit আর SMS একসাথে এলে race এড়াতে (একটি সার্ভার ইনস্ট্যান্সের জন্য) */
     private static final Object MATCH_LOCK = new Object();
 
     private final DepositRequestRepository repo;
@@ -53,6 +50,7 @@ public class DepositService {
     private final PaymentRotationService rotation;
     private final SimpMessagingTemplate ws;
     private final UserService userService;
+    private final TelegramService telegram;
     private final TransactionTemplate tx;
 
     @PersistenceContext
@@ -60,23 +58,24 @@ public class DepositService {
 
     public DepositService(DepositRequestRepository repo, PaymentSmsRepository smsRepo,
                           PaymentRotationService rotation, SimpMessagingTemplate ws,
-                          PlatformTransactionManager tm, UserService userService) {
+                          PlatformTransactionManager tm, UserService userService,
+                          TelegramService telegram) {
         this.repo = repo;
         this.smsRepo = smsRepo;
         this.rotation = rotation;
         this.ws = ws;
         this.userService = userService;
+        this.telegram = telegram;
         this.tx = new TransactionTemplate(tm);
     }
 
-    // ============ 1) PREPARE: অটো রোটেশনে অ্যাডমিন নম্বর ============
+    // ============ 1) PREPARE ============
     @Transactional
     public DepositRequest prepare(User user, String method, BigDecimal amount) {
         if (user.isBlocked()) throw err(HttpStatus.FORBIDDEN, "আপনার অ্যাকাউন্ট ব্লকড");
         amount = validateAmount(amount);
         String m = PaymentRules.normalizeMethod(method);
 
-        // স্প্যাম ঠেকাতে: TrxID না দেওয়া অসমাপ্ত ডিপোজিট সীমিত
         Long open = em.createQuery(
                         "select count(d) from DepositRequest d "
                                 + "where d.user.id = :uid and d.status = :st and d.userTransactionId is null",
@@ -97,11 +96,11 @@ public class DepositService {
         d.setMethod(m);
         d.setPaymentAccountNumber(acc.number());
         d.setAdminAccountId(acc.id());
-        d.setTransactionId(newServerTxnId());
+        d.setTransactionId(newServerTxnId());   // DEP + ৭ ডিজিট
         return repo.save(d);
     }
 
-    // ============ 2) SUBMIT: ইউজার TrxID দেয় -> অটো ম্যাচ ============
+    // ============ 2) SUBMIT ============
     public DepositRequest submit(User user, Long depositId, String userTrxId) {
         synchronized (MATCH_LOCK) {
             try {
@@ -128,21 +127,21 @@ public class DepositService {
         d.setSubmittedAt(LocalDateTime.now());
         repo.saveAndFlush(d);
 
-        // আগে SMS চলে এসে থাকলে এখনই ম্যাচ
         Optional<PaymentSms> sms = smsRepo.findFirstByMethodAndTrxIdAndStatus(d.getMethod(), trx, PaymentSms.Status.WAITING);
         if (sms.isPresent() && sms.get().getAmount().compareTo(d.getAmount()) == 0) {
             PaymentSms p = sms.get();
             p.setStatus(PaymentSms.Status.MATCHED);
             p.setMatchedDepositId(d.getId());
             smsRepo.save(p);
-            approveInternal(d, null, true);
+            approveInternal(d, null, true);   // এখানেই টেলিগ্রাম "অটো অ্যাপ্রুভ" যায়
         } else {
             notifyAfterCommit(d.getUser().getGameId(), "আপনার ডিপোজিট রিভিউয়ের জন্য জমা হয়েছে");
+            telegramAfterCommit("🆕 নতুন ডিপোজিট (রিভিউ দরকার)", d.getUser(), d);
         }
         return d;
     }
 
-    // ============ 3) মোবাইল থেকে SMS -> অটো আপ্রুভ ============
+    // ============ 3) SMS ============
     public SmsResult ingestSms(String sender, String message) {
         SmsParser.Parsed p = SmsParser.parse(sender, message);
         if (p == null) return SmsResult.IGNORED;
@@ -174,7 +173,7 @@ public class DepositService {
         }
     }
 
-    // ============ 4) অ্যাডমিন / সাপোর্ট ম্যানুয়াল ============
+    // ============ 4) অ্যাডমিন / সাপোর্ট ============
     @Transactional
     public DepositRequest approve(Long id, User admin, String note) {
         DepositRequest d = lockPending(id);
@@ -192,6 +191,7 @@ public class DepositService {
         d.setProcessedAt(LocalDateTime.now());
         repo.save(d);
         notifyAfterCommit(d.getUser().getGameId(), "আপনার " + d.getAmount() + " টাকার ডিপোজিট রিজেক্ট হয়েছে");
+        telegramAfterCommit("❌ ডিপোজিট রিজেক্ট", d.getUser(), d);
         return d;
     }
 
@@ -205,19 +205,31 @@ public class DepositService {
     }
 
     // ============ Queries ============
+    /** ইউজার শুধু নিজের হিস্ট্রি দেখবে */
     @Transactional(readOnly = true)
     public List<DepositRequest> myDeposits(User user) {
         return repo.findByUserOrderByIdDesc(user);
     }
 
+    /** অ্যাডমিন: সবার হিস্ট্রি */
     @Transactional(readOnly = true)
     public Page<DepositRequest> list(Status status, int page, int size) {
-        PageRequest pr = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), 200),
-                Sort.by(Sort.Direction.DESC, "id"));
+        PageRequest pr = pageable(page, size);
         return status == null ? repo.findAll(pr) : repo.findByStatus(status, pr);
     }
 
+    /** অ্যাডমিন: সার্চ (gameId / মোবাইল / DEP ID / TrxID) */
+    @Transactional(readOnly = true)
+    public Page<DepositRequest> search(String q, Status status, int page, int size) {
+        return repo.search(q == null ? "" : q.trim(), status, pageable(page, size));
+    }
+
     // ============ Internals ============
+    private static PageRequest pageable(int page, int size) {
+        return PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), 200),
+                Sort.by(Sort.Direction.DESC, "id"));
+    }
+
     private DepositRequest lockPending(Long id) {
         DepositRequest d = repo.findByIdForUpdate(id)
                 .orElseThrow(() -> err(HttpStatus.NOT_FOUND, "Deposit not found"));
@@ -225,17 +237,12 @@ public class DepositService {
         return d;
     }
 
-    /**
-     * ব্যালেন্স + টার্নওভার যোগ (addDeposit) + status APPROVED।
-     * কলারকে অবশ্যই transaction-এর ভেতরে থাকতে হবে।
-     */
     private void approveInternal(DepositRequest d, Long adminId, boolean auto) {
         User u = em.find(User.class, d.getUser().getId(), LockModeType.PESSIMISTIC_WRITE);
         if (u == null) throw err(HttpStatus.NOT_FOUND, "User not found");
-        // পারসিস্টেন্স কনটেক্সটে আগে থেকে থাকলে ব্যালেন্স stale হতে পারে, তাই DB থেকে নতুন করে আনি
         em.refresh(u, LockModeType.PESSIMISTIC_WRITE);
 
-        u.addDeposit(d.getAmount());                 // ব্যালেন্সও বাড়ে, টার্নওভারও সমান বাড়ে
+        u.addDeposit(d.getAmount());
 
         d.setStatus(Status.APPROVED);
         d.setAutoApproved(auto);
@@ -246,18 +253,24 @@ public class DepositService {
         onDepositApproved(u, d);
 
         notifyAfterCommit(u.getGameId(), "আপনার " + d.getAmount() + " টাকার ডিপোজিট অ্যাপ্রুভ হয়েছে!");
-        // কমিট হওয়ার পর ওয়ালেটের নতুন ব্যালেন্স রিয়েলটাইমে পাঠানো
         refreshProfileAfterCommit(u.getGameId());
+        telegramAfterCommit(auto ? "✅ ডিপোজিট অটো অ্যাপ্রুভ" : "✅ ডিপোজিট ম্যানুয়াল অ্যাপ্রুভ", u, d);
     }
 
-    /**
-     * TODO: ডিপোজিট অ্যাপ্রুভ হলে যা যা হবে সেই বোনাস লজিক এখানে বসবে
-     * (first-deposit বোনাস, রেফারারের PENDING বোনাস COMPLETED করা ইত্যাদি)।
-     * এই মেথড approveInternal-এর transaction-এর ভেতরেই চলে।
-     * বোনাস দিলে u.addDeposit(...) ব্যবহার করুন (ব্যালেন্স + টার্নওভার দুটোই বাড়বে)।
-     */
     private void onDepositApproved(User user, DepositRequest deposit) {
-        // এখনো কোনো বোনাস নেই
+        // TODO: first-deposit বোনাস ইত্যাদি
+    }
+
+    /** টেক্সট ট্রানজ্যাকশনের ভেতরেই বানানো হয় (lazy সমস্যা এড়াতে), পাঠানো হয় commit-এর পর */
+    private void telegramAfterCommit(String title, User u, DepositRequest d) {
+        String text = title + "\n"
+                + "Server ID: " + d.getTransactionId() + "\n"
+                + "User: " + u.getGameId() + " (" + u.getMobile() + ")\n"
+                + "Method: " + d.getMethod() + "\n"
+                + "Amount: " + d.getAmount() + " টাকা\n"
+                + "TrxID: " + (d.getUserTransactionId() == null ? "-" : d.getUserTransactionId()) + "\n"
+                + "পেমেন্ট নম্বর: " + d.getPaymentAccountNumber();
+        afterCommit(() -> telegram.send(text));
     }
 
     private void afterCommit(Runnable r) {
@@ -275,7 +288,7 @@ public class DepositService {
             try {
                 ws.convertAndSend("/topic/notifications/" + gameId,
                         new NotificationDto("Deposit Update", msg, LocalDateTime.now().toString()));
-            } catch (Exception ignored) { /* নোটিফিকেশন ফেল হলেও ডিপোজিট নষ্ট হবে না */ }
+            } catch (Exception ignored) { }
         });
     }
 
@@ -283,7 +296,7 @@ public class DepositService {
         afterCommit(() -> {
             try {
                 userService.notifyUserUpdate(gameId);
-            } catch (Exception ignored) { /* রিয়েলটাইম ফেল হলেও ডিপোজিট নষ্ট হবে না */ }
+            } catch (Exception ignored) { }
         });
     }
 
