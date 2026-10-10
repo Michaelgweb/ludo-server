@@ -44,8 +44,20 @@ public interface UserService {
     void setBalance(String gameId, BigDecimal newBalance);
     /** ডিপোজিট/বোনাস: ব্যালেন্স + টার্নওভার দুটোই বাড়ে */
     void addBalance(String gameId, BigDecimal amount);
-    /** এন্ট্রি ফি: ব্যালেন্স কমে + টার্নওভার ১০০% কমে */
-    void deductBalance(String gameId, BigDecimal amount);
+
+    /**
+     * এন্ট্রি ফি: ব্যালেন্স কমে + টার্নওভার ১০০% কমে (০ এর নিচে যায় না)।
+     * রিটার্ন: টার্নওভার আসলে কত কমল (ফি-র চেয়ে কম হতে পারে)।
+     * এই মানটা ম্যাচের অংশগ্রহণকারীর রেকর্ডে সেভ রাখুন, বাতিলে refundEntryFee এ দিতে হবে।
+     */
+    BigDecimal deductBalance(String gameId, BigDecimal amount);
+
+    /**
+     * ম্যাচ বাতিলে এন্ট্রি ফি ফেরত: পুরো amount ব্যালেন্সে ফেরত,
+     * আর টার্নওভার শুধু turnoverRestore পরিমাণ ফেরত (deductBalance এর রিটার্ন মান)।
+     */
+    void refundEntryFee(String gameId, BigDecimal amount, BigDecimal turnoverRestore);
+
     /** উত্তোলনযোগ্য টাকা (টার্নওভার বাকি থাকলে ০) */
     BigDecimal getWithdrawBalance(String gameId);
     /** জেতা টাকা: শুধু ব্যালেন্স বাড়ে */
