@@ -82,13 +82,18 @@ public class UserController {
         dto.setMobile(user.getMobile());
         dto.setDisplayName(user.getDisplayName());
         dto.setAvatarUrl(user.getAvatarUrl());
-        dto.setBalance(user.getBalance());
         dto.setRole(user.getRole().name());
         dto.setGameId(user.getGameId());
-        dto.setLifetimeEarnings(user.getLifetimeEarnings());
         dto.setReferralCode(user.getReferralCode());
         dto.setReferredBy(user.getReferredBy());
         dto.setSignupBonusClaimed(user.isSignupBonusClaimed());
+
+        // ================= Wallet =================
+        dto.setBalance(user.getBalance());
+        dto.setTurnoverBalance(user.getTurnoverBalance());
+        dto.setWithdrawableBalance(user.getWithdrawableBalance());
+        dto.setLifetimeEarnings(user.getLifetimeEarnings());
+        dto.setLifetimeWithdraw(user.getLifetimeWithdraw());
         return dto;
     }
 
@@ -163,7 +168,10 @@ public class UserController {
     @GetMapping("/balance")
     public ResponseEntity<Map<String, Object>> getBalance(Authentication authentication) {
         User user = getAuthenticatedUser(authentication);
-        return ResponseEntity.ok(Map.of("balance", user.getBalance()));
+        return ResponseEntity.ok(Map.of(
+                "balance", user.getBalance(),
+                "turnoverBalance", user.getTurnoverBalance(),
+                "withdrawableBalance", user.getWithdrawableBalance()));
     }
 
     @GetMapping("/referral/{referralCode}")
