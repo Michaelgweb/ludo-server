@@ -214,16 +214,36 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     }
 
     // ================= DEDUCT BALANCE (এন্ট্রি ফি) =================
-    // ব্যালেন্স কমে + টার্নওভার ১০০% কমে (০ এর নিচে যায় না)
+    // ব্যালেন্স কমে + টার্নওভার ১০০% কমে (০ এর নিচে যায় না)।
+    // রিটার্ন: টার্নওভার আসলে কত কমল। এটা ম্যাচ অংশগ্রহণকারীর রেকর্ডে সেভ রাখুন।
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void deductBalance(String gameId, BigDecimal amount) {
+    public BigDecimal deductBalance(String gameId, BigDecimal amount) {
         if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalArgumentException("Invalid amount");
         }
 
         User user = lockAndGetByGameId(gameId);
-        user.deduct(scale(amount)); // Insufficient হলে IllegalStateException
+        BigDecimal turnoverReduced = user.deduct(scale(amount)); // Insufficient হলে IllegalStateException
+
+        userRepository.saveAndFlush(user);
+        sendProfile(user);
+        sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
+
+        return scale(turnoverReduced);
+    }
+
+    // ================= REFUND ENTRY FEE (ম্যাচ বাতিল) =================
+    // পুরো ফি ব্যালেন্সে ফেরত, টার্নওভার শুধু যতটুকু কমেছিল ততটুকু ফেরত
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void refundEntryFee(String gameId, BigDecimal amount, BigDecimal turnoverRestore) {
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new IllegalArgumentException("Invalid amount");
+        }
+
+        User user = lockAndGetByGameId(gameId);
+        user.refundEntryFee(scale(amount), scale(turnoverRestore));
 
         userRepository.saveAndFlush(user);
         sendProfile(user);
@@ -246,7 +266,12 @@ public class UserServiceImpl implements UserService, UserDetailsService {
         sendEvent(EVENT_BALANCE_UPDATED, gameId, toDto(user));
     }
 
-    // ================= REFUND (ম্যাচ বাতিল: টাকা + টার্নওভার ফেরত) =================
+    // ================= REFUND (পুরনো) =================
+    /**
+     * @deprecated ম্যাচ বাতিলে এটা ব্যবহার করবেন না: এটা ফি-র পুরোটাই টার্নওভারে যোগ করে,
+     * অথচ deduct() টার্নওভার ০ এ আটকে গেলে কম কমে। refundEntryFee() ব্যবহার করুন।
+     */
+    @Deprecated
     @Transactional(rollbackFor = Exception.class)
     public void refundBalance(String gameId, BigDecimal amount) {
         addDepositBalance(gameId, amount);
@@ -268,7 +293,7 @@ public class UserServiceImpl implements UserService, UserDetailsService {
     @Transactional(rollbackFor = Exception.class)
     public void holdForWithdraw(String gameId, BigDecimal amount) {
         User user = lockAndGetByGameId(gameId);
-        user.holdForWithdraw(scale(amount)); // টার্নওভার বাকি থাকলে এরর
+        user.holdForWithdraw(scale(amount)); // টার্নওভার বাকি থাকলে IllegalStateException
 
         userRepository.saveAndFlush(user);
         sendProfile(user);
