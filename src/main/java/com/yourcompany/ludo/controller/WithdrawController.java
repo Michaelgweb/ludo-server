@@ -6,10 +6,10 @@ import com.yourcompany.ludo.model.WithdrawRequest;
 import com.yourcompany.ludo.service.NotificationService;
 import com.yourcompany.ludo.service.UserService;
 import com.yourcompany.ludo.service.WithdrawService;
-import com.yourcompany.ludo.service.impl.OtpServiceImpl;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
@@ -17,6 +17,7 @@ import java.math.RoundingMode;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @RestController
@@ -30,13 +31,40 @@ public class WithdrawController {
     private UserService userService;
 
     @Autowired
-    private OtpServiceImpl otpService;
+    private NotificationService notificationService;
 
     @Autowired
-    private NotificationService notificationService;
+    private PasswordEncoder passwordEncoder;
+
+    // ভুল লগইন পাসওয়ার্ড দিয়ে অনুমান করা ঠেকাতে: ৫ বার ভুল হলে ১৫ মিনিট উইথড্র বন্ধ।
+    // মেমোরিতে রাখা হয় (সার্ভার রিস্টার্টে রিসেট হয়, একাধিক সার্ভার চললে প্রতিটির নিজস্ব গণনা)
+    private static final int MAX_PASSWORD_ATTEMPTS = 5;
+    private static final long PASSWORD_LOCK_MILLIS = 15 * 60 * 1000L;
+    private final Map<String, long[]> passwordAttempts = new ConcurrentHashMap<>(); // [ভুলের সংখ্যা, লক শেষের সময়]
 
     private boolean isAdmin(User user) {
         return user != null && "ADMIN".equalsIgnoreCase(user.getRole().name());
+    }
+
+    /** লক চললে কত মিনিট বাকি (না থাকলে ০) */
+    private long passwordLockMinutesLeft(String gameId) {
+        long[] st = passwordAttempts.get(gameId);
+        if (st == null) return 0;
+        long left = st[1] - System.currentTimeMillis();
+        return left > 0 ? (left + 59_999) / 60_000 : 0;
+    }
+
+    private void recordWrongPassword(String gameId) {
+        passwordAttempts.compute(gameId, (k, st) -> {
+            long now = System.currentTimeMillis();
+            if (st == null || (st[1] != 0 && st[1] <= now)) st = new long[]{0, 0};
+            st[0]++;
+            if (st[0] >= MAX_PASSWORD_ATTEMPTS) {
+                st[1] = now + PASSWORD_LOCK_MILLIS;
+                st[0] = 0;
+            }
+            return st;
+        });
     }
 
     /** ================== ADMIN ENDPOINTS ================== **/
@@ -136,13 +164,6 @@ public class WithdrawController {
 
     /** ================== USER ENDPOINTS ================== **/
 
-    @PostMapping("/send-otp")
-    public ResponseEntity<?> sendWithdrawOtp(Authentication auth) {
-        User user = userService.findByGameId(auth.getName()).orElse(null);
-        if (user == null) return ResponseEntity.status(401).body(Map.of("error", "Unauthorized"));
-        return otpService.sendWithdrawOtp(user.getMobile());
-    }
-
     @PostMapping("/request")
     public ResponseEntity<?> requestWithdraw(@RequestBody Map<String, Object> requestData,
                                              Authentication auth) {
@@ -152,10 +173,14 @@ public class WithdrawController {
         Object a = requestData.get("amount");
         Object m = requestData.get("method");
         Object r = requestData.get("receiverNumber");
-        Object o = requestData.get("otp");
-        if (a == null || m == null || r == null || o == null) {
-            return ResponseEntity.badRequest().body("amount, method, receiverNumber ও otp দিন");
+        Object p = requestData.get("password");
+        if (a == null || m == null || r == null) {
+            return ResponseEntity.badRequest().body("amount, method ও receiverNumber দিন");
         }
+        if (p == null || p.toString().isEmpty()) {
+            return ResponseEntity.badRequest().body("আপনার লগইন পাসওয়ার্ড দিন");
+        }
+        String password = p.toString();   // trim করা হয় না, পাসওয়ার্ডে স্পেস থাকতে পারে
 
         BigDecimal amount;
         try {
@@ -169,7 +194,6 @@ public class WithdrawController {
 
         String method = m.toString().trim();
         String receiver = r.toString().trim();
-        String otp = o.toString().trim();
 
         if (method.isEmpty() || method.length() > 20) {
             return ResponseEntity.badRequest().body("Invalid method");
@@ -178,17 +202,30 @@ public class WithdrawController {
             return ResponseEntity.badRequest().body("Invalid receiver number");
         }
 
-        // সস্তা আগাম চেক (OTP অকারণে খরচ না করতে)। আসল চেক সার্ভিসে লকের ভেতরে হয়
-        if (userService.getWithdrawBalance(user.getGameId()).compareTo(amount) < 0) {
-            return ResponseEntity.badRequest().body("Turnover incomplete or insufficient balance");
+        // সস্তা আগাম চেক। আসল চেক সার্ভিসে লকের ভেতরে হয়
+        BigDecimal turnoverLeft = userService.getTurnoverBalance(user.getGameId());
+        if (turnoverLeft.signum() > 0) {
+            return ResponseEntity.badRequest()
+                    .body("উইথড্র করতে আরও " + turnoverLeft.toPlainString() + " টাকার টার্নওভার বাকি");
+        }
+        if (userService.getBalance(user.getGameId()).compareTo(amount) < 0) {
+            return ResponseEntity.badRequest().body("ব্যালেন্স অপর্যাপ্ত");
         }
 
-        if (!otpService.verifyWithdrawOtp(user.getMobile(), otp)) {
-            return ResponseEntity.badRequest().body("Invalid or expired OTP");
+        // লগইন পাসওয়ার্ড যাচাই (সাবমিটের একমাত্র নিরাপত্তা ধাপ)
+        long lockMinutes = passwordLockMinutesLeft(user.getGameId());
+        if (lockMinutes > 0) {
+            return ResponseEntity.status(429)
+                    .body("অনেকবার ভুল পাসওয়ার্ড দিয়েছেন। " + lockMinutes + " মিনিট পরে চেষ্টা করুন");
         }
+        if (!passwordEncoder.matches(password, user.getPassword())) {
+            recordWrongPassword(user.getGameId());
+            return ResponseEntity.badRequest().body("পাসওয়ার্ড ভুল");
+        }
+        passwordAttempts.remove(user.getGameId());
 
         try {
-            // লক + টার্নওভার চেক + ব্যালেন্স কাটা + রিকোয়েস্ট তৈরি, সবই এক ট্রানজেকশনে
+            // লক + টার্নওভার চেক + ব্যালেন্স কাটা + রিকোয়েস্ট তৈরি + টেলিগ্রাম, সবই সার্ভিসে
             WithdrawRequest created =
                     withdrawService.requestWithdraw(user.getGameId(), amount, method, receiver);
 
