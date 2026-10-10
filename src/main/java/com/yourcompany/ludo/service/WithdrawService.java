@@ -3,8 +3,12 @@ package com.yourcompany.ludo.service;
 import com.yourcompany.ludo.model.User;
 import com.yourcompany.ludo.model.WithdrawRequest;
 import com.yourcompany.ludo.repository.WithdrawRequestRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.security.SecureRandom;
@@ -17,18 +21,26 @@ import java.util.List;
  *  2) অ্যাপ্রুভ: লাইফটাইম উত্তোলন বাড়ে (ব্যালেন্সে প্রভাব নেই)
  *  3) রিজেক্ট: ব্যালেন্সে ফেরত (টার্নওভার বদলায় না)
  * অ্যাপ্রুভ/রিজেক্টে রিকোয়েস্ট রো লক হয়, তাই একই রিকোয়েস্ট দুবার প্রসেস হয় না।
+ *
+ * টেলিগ্রাম: রিকোয়েস্ট / অ্যাপ্রুভ / রিজেক্ট তিনটাতেই মেসেজ যায়। টেক্সট ট্রানজেকশনের ভেতরে বানানো হয়
+ * (lazy সমস্যা এড়াতে), পাঠানো হয় কমিটের পরে। রোলব্যাক হলে মেসেজ যায় না, ফেল করলেও টাকার কাজে প্রভাব নেই।
  */
 @Service
 public class WithdrawService {
 
+    private static final Logger log = LoggerFactory.getLogger(WithdrawService.class);
+
     private final WithdrawRequestRepository withdrawRequestRepository;
     private final UserService userService;
+    private final TelegramService telegram;
     private final SecureRandom random = new SecureRandom();
 
     public WithdrawService(WithdrawRequestRepository withdrawRequestRepository,
-                           UserService userService) {
+                           UserService userService,
+                           TelegramService telegram) {
         this.withdrawRequestRepository = withdrawRequestRepository;
         this.userService = userService;
+        this.telegram = telegram;
     }
 
     /**
@@ -48,7 +60,17 @@ public class WithdrawService {
         w.setAmount(amount);
         w.setMethod(method);
         w.setReceiverNumber(receiverNumber);
-        return createWithdrawRequest(w);
+        WithdrawRequest saved = createWithdrawRequest(w);
+
+        telegramAfterCommit("🆕 নতুন উইথড্র রিকোয়েস্ট\n"
+                + "Request ID: " + saved.getId() + "\n"
+                + "User: " + user.getGameId() + " (" + user.getMobile() + ")\n"
+                + "Method: " + method + "\n"
+                + "Amount: " + amount + " টাকা\n"
+                + "প্রাপকের নম্বর: " + receiverNumber + "\n"
+                + "বাকি ব্যালেন্স: " + user.getBalance() + " টাকা\n"
+                + "Status: PENDING");
+        return saved;
     }
 
     @Transactional
@@ -94,7 +116,17 @@ public class WithdrawService {
         request.setTransactionId(txnId);
         request.setApprovedAt(LocalDateTime.now());
 
-        return withdrawRequestRepository.save(request);
+        WithdrawRequest saved = withdrawRequestRepository.save(request);
+
+        telegramAfterCommit("✅ উইথড্র অ্যাপ্রুভ\n"
+                + "Request ID: " + saved.getId() + "\n"
+                + "User: " + saved.getUser().getGameId() + " (" + saved.getUser().getMobile() + ")\n"
+                + "Method: " + saved.getMethod() + "\n"
+                + "Amount: " + saved.getAmount() + " টাকা\n"
+                + "প্রাপকের নম্বর: " + saved.getReceiverNumber() + "\n"
+                + "TrxID: " + saved.getTransactionId() + "\n"
+                + "Status: APPROVED");
+        return saved;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -116,7 +148,15 @@ public class WithdrawService {
         request.setRejectedAt(LocalDateTime.now());
         request.setCountedInLifetime(false);
 
-        return withdrawRequestRepository.save(request);
+        WithdrawRequest saved = withdrawRequestRepository.save(request);
+
+        telegramAfterCommit("❌ উইথড্র রিজেক্ট (টাকা ব্যালেন্সে ফেরত)\n"
+                + "Request ID: " + saved.getId() + "\n"
+                + "User: " + saved.getUser().getGameId() + " (" + saved.getUser().getMobile() + ")\n"
+                + "Method: " + saved.getMethod() + "\n"
+                + "Amount: " + saved.getAmount() + " টাকা\n"
+                + "Status: REJECTED");
+        return saved;
     }
 
     private String prepareTxnId(String txnId) throws Exception {
@@ -155,5 +195,27 @@ public class WithdrawService {
     @Transactional
     public WithdrawRequest save(WithdrawRequest request) {
         return withdrawRequestRepository.save(request);
+    }
+
+    // ---------------------------------------------------------------
+    /** টেলিগ্রাম: কমিটের পরে, ফেল করলেও টাকার কাজে প্রভাব নেই */
+    private void telegramAfterCommit(String text) {
+        afterCommit(() -> {
+            try {
+                telegram.send(text);
+            } catch (Exception e) {
+                log.warn("Telegram notify failed: {}", e.getMessage());
+            }
+        });
+    }
+
+    private void afterCommit(Runnable r) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void afterCommit() { r.run(); }
+            });
+        } else {
+            r.run();
+        }
     }
 }
