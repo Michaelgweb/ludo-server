@@ -1,265 +1,221 @@
-package com.yourcompany.ludo.controller;
+package com.yourcompany.ludo.service;
 
-import com.yourcompany.ludo.dto.WithdrawRequestDto;
 import com.yourcompany.ludo.model.User;
 import com.yourcompany.ludo.model.WithdrawRequest;
-import com.yourcompany.ludo.service.NotificationService;
-import com.yourcompany.ludo.service.UserService;
-import com.yourcompany.ludo.service.WithdrawService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.web.bind.annotation.*;
+import com.yourcompany.ludo.repository.WithdrawRequestRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.util.HashMap;
+import java.security.SecureRandom;
+import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
-@RestController
-@RequestMapping("/api/withdraw")
-public class WithdrawController {
+/**
+ * উত্তোলন প্রবাহ:
+ *  1) রিকোয়েস্ট: টার্নওভার ০ কিনা চেক + ব্যালেন্স কাটা + রিকোয়েস্ট তৈরি (এক ট্রানজেকশনে)
+ *  2) অ্যাপ্রুভ: লাইফটাইম উত্তোলন বাড়ে (ব্যালেন্সে প্রভাব নেই)
+ *  3) রিজেক্ট: ব্যালেন্সে ফেরত (টার্নওভার বদলায় না)
+ * অ্যাপ্রুভ/রিজেক্টে রিকোয়েস্ট রো লক হয়, তাই একই রিকোয়েস্ট দুবার প্রসেস হয় না।
+ *
+ * টেলিগ্রাম: রিকোয়েস্ট / অ্যাপ্রুভ / রিজেক্ট তিনটাতেই মেসেজ যায়। টেক্সট ট্রানজেকশনের ভেতরে বানানো হয়
+ * (lazy সমস্যা এড়াতে), পাঠানো হয় কমিটের পরে। রোলব্যাক হলে মেসেজ যায় না, ফেল করলেও টাকার কাজে প্রভাব নেই।
+ */
+@Service
+public class WithdrawService {
 
-    @Autowired
-    private WithdrawService withdrawService;
+    private static final Logger log = LoggerFactory.getLogger(WithdrawService.class);
 
-    @Autowired
-    private UserService userService;
+    private final WithdrawRequestRepository withdrawRequestRepository;
+    private final UserService userService;
+    private final TelegramService telegram;
+    private final SecureRandom random = new SecureRandom();
 
-    @Autowired
-    private NotificationService notificationService;
-
-    @Autowired
-    private PasswordEncoder passwordEncoder;
-
-    // ভুল লগইন পাসওয়ার্ড দিয়ে অনুমান করা ঠেকাতে: ৫ বার ভুল হলে ১৫ মিনিট উইথড্র বন্ধ।
-    // মেমোরিতে রাখা হয় (সার্ভার রিস্টার্টে রিসেট হয়, একাধিক সার্ভার চললে প্রতিটির নিজস্ব গণনা)
-    private static final int MAX_PASSWORD_ATTEMPTS = 5;
-    private static final long PASSWORD_LOCK_MILLIS = 15 * 60 * 1000L;
-    private final Map<String, long[]> passwordAttempts = new ConcurrentHashMap<>(); // [ভুলের সংখ্যা, লক শেষের সময়]
-
-    private boolean isAdmin(User user) {
-        return user != null && "ADMIN".equalsIgnoreCase(user.getRole().name());
+    public WithdrawService(WithdrawRequestRepository withdrawRequestRepository,
+                           UserService userService,
+                           TelegramService telegram) {
+        this.withdrawRequestRepository = withdrawRequestRepository;
+        this.userService = userService;
+        this.telegram = telegram;
     }
 
-    /** লক চললে কত মিনিট বাকি (না থাকলে ০) */
-    private long passwordLockMinutesLeft(String gameId) {
-        long[] st = passwordAttempts.get(gameId);
-        if (st == null) return 0;
-        long left = st[1] - System.currentTimeMillis();
-        return left > 0 ? (left + 59_999) / 60_000 : 0;
+    /**
+     * ইউজারের উত্তোলন রিকোয়েস্ট। ইউজার রো লক করে টার্নওভার ও ব্যালেন্স চেক করে কাটে,
+     * রিকোয়েস্ট তৈরি ব্যর্থ হলে পুরোটাই রোলব্যাক হয়।
+     * টার্নওভার বাকি বা ব্যালেন্স কম হলে IllegalStateException।
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public WithdrawRequest requestWithdraw(String gameId, BigDecimal amount,
+                                           String method, String receiverNumber) {
+        userService.holdForWithdraw(gameId, amount);
+        User user = userService.findByGameId(gameId)
+                .orElseThrow(() -> new IllegalStateException("User not found"));
+
+        WithdrawRequest w = new WithdrawRequest();
+        w.setUser(user);
+        w.setAmount(amount);
+        w.setMethod(method);
+        w.setReceiverNumber(receiverNumber);
+        WithdrawRequest saved = createWithdrawRequest(w);
+
+        telegramAfterCommit("🆕 নতুন উইথড্র রিকোয়েস্ট\n"
+                + "Request ID: " + saved.getId() + "\n"
+                + "User: " + user.getGameId() + " (" + user.getMobile() + ")\n"
+                + "Method: " + method + "\n"
+                + "Amount: " + amount + " টাকা\n"
+                + "প্রাপকের নম্বর: " + receiverNumber + "\n"
+                + "বাকি ব্যালেন্স: " + user.getBalance() + " টাকা\n"
+                + "Status: PENDING");
+        return saved;
     }
 
-    private void recordWrongPassword(String gameId) {
-        passwordAttempts.compute(gameId, (k, st) -> {
-            long now = System.currentTimeMillis();
-            if (st == null || (st[1] != 0 && st[1] <= now)) st = new long[]{0, 0};
-            st[0]++;
-            if (st[0] >= MAX_PASSWORD_ATTEMPTS) {
-                st[1] = now + PASSWORD_LOCK_MILLIS;
-                st[0] = 0;
+    @Transactional
+    public WithdrawRequest createWithdrawRequest(WithdrawRequest request) {
+        request.setStatus(WithdrawRequest.Status.PENDING);
+        request.setRequestedAt(LocalDateTime.now());
+        return withdrawRequestRepository.save(request);
+    }
+
+    @Transactional(readOnly = true)
+    public List<WithdrawRequest> getAll() {
+        return withdrawRequestRepository.findAll();
+    }
+
+    @Transactional(readOnly = true)
+    public List<WithdrawRequest> getByUser(User user) {
+        return withdrawRequestRepository.findByUser(user);
+    }
+
+    @Transactional(readOnly = true)
+    public List<WithdrawRequest> getPending() {
+        return withdrawRequestRepository.findByStatus(WithdrawRequest.Status.PENDING);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public WithdrawRequest approve(Long id, String txnId) throws Exception {
+        WithdrawRequest request = withdrawRequestRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new Exception("Withdraw not found"));
+
+        if (request.getStatus() != WithdrawRequest.Status.PENDING) {
+            throw new Exception("Withdraw already processed");
+        }
+
+        txnId = prepareTxnId(txnId);
+
+        // লাইফটাইম উত্তোলন (শুধু দেখানোর জন্য), একবারই গোনা হবে
+        if (!Boolean.TRUE.equals(request.getCountedInLifetime())) {
+            userService.addLifetimeWithdraw(request.getUser().getGameId(), request.getAmount());
+            request.setCountedInLifetime(true);
+        }
+
+        request.setStatus(WithdrawRequest.Status.APPROVED);
+        request.setTransactionId(txnId);
+        request.setApprovedAt(LocalDateTime.now());
+
+        WithdrawRequest saved = withdrawRequestRepository.save(request);
+
+        telegramAfterCommit("✅ উইথড্র অ্যাপ্রুভ\n"
+                + "Request ID: " + saved.getId() + "\n"
+                + "User: " + saved.getUser().getGameId() + " (" + saved.getUser().getMobile() + ")\n"
+                + "Method: " + saved.getMethod() + "\n"
+                + "Amount: " + saved.getAmount() + " টাকা\n"
+                + "প্রাপকের নম্বর: " + saved.getReceiverNumber() + "\n"
+                + "TrxID: " + saved.getTransactionId() + "\n"
+                + "Status: APPROVED");
+        return saved;
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public WithdrawRequest reject(Long id, String txnId) throws Exception {
+        WithdrawRequest request = withdrawRequestRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new Exception("Withdraw not found"));
+
+        if (request.getStatus() != WithdrawRequest.Status.PENDING) {
+            throw new Exception("Withdraw already processed");
+        }
+
+        txnId = prepareTxnId(txnId);
+
+        // টাকা ব্যালেন্সে ফেরত (টার্নওভার বদলায় না)
+        userService.refundWithdraw(request.getUser().getGameId(), request.getAmount());
+
+        request.setTransactionId(txnId);
+        request.setStatus(WithdrawRequest.Status.REJECTED);
+        request.setRejectedAt(LocalDateTime.now());
+        request.setCountedInLifetime(false);
+
+        WithdrawRequest saved = withdrawRequestRepository.save(request);
+
+        telegramAfterCommit("❌ উইথড্র রিজেক্ট (টাকা ব্যালেন্সে ফেরত)\n"
+                + "Request ID: " + saved.getId() + "\n"
+                + "User: " + saved.getUser().getGameId() + " (" + saved.getUser().getMobile() + ")\n"
+                + "Method: " + saved.getMethod() + "\n"
+                + "Amount: " + saved.getAmount() + " টাকা\n"
+                + "Status: REJECTED");
+        return saved;
+    }
+
+    private String prepareTxnId(String txnId) throws Exception {
+        if (txnId == null || txnId.trim().isEmpty()) {
+            return generateUniqueTxnId();
+        }
+        txnId = txnId.trim();
+        if (existsByTxnId(txnId)) {
+            throw new Exception("Transaction ID already exists");
+        }
+        return txnId;
+    }
+
+    @Transactional(readOnly = true)
+    public boolean existsByTxnId(String txnId) {
+        return withdrawRequestRepository.existsByTransactionId(txnId);
+    }
+
+    public String generateUniqueTxnId() {
+        String txnId;
+        do {
+            int number = 10000000 + random.nextInt(90000000);
+            txnId = "MG" + number;
+        } while (existsByTxnId(txnId));
+        return txnId;
+    }
+
+    @Transactional(readOnly = true)
+    public BigDecimal getTotalWithdrawn(User user) {
+        return withdrawRequestRepository.findByUser(user).stream()
+                .filter(w -> w.getStatus() == WithdrawRequest.Status.APPROVED)
+                .map(WithdrawRequest::getAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    @Transactional
+    public WithdrawRequest save(WithdrawRequest request) {
+        return withdrawRequestRepository.save(request);
+    }
+
+    // ---------------------------------------------------------------
+    /** টেলিগ্রাম: কমিটের পরে, ফেল করলেও টাকার কাজে প্রভাব নেই */
+    private void telegramAfterCommit(String text) {
+        afterCommit(() -> {
+            try {
+                telegram.send(text);
+            } catch (Exception e) {
+                log.warn("Telegram notify failed: {}", e.getMessage());
             }
-            return st;
         });
     }
 
-    /** ================== ADMIN ENDPOINTS ================== **/
-
-    @GetMapping("/all")
-    public ResponseEntity<?> getAllWithdraws(Authentication auth) {
-        User user = userService.findByGameId(auth.getName()).orElse(null);
-        if (!isAdmin(user)) return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
-
-        List<WithdrawRequest> list = withdrawService.getAll();
-        return ResponseEntity.ok(list.stream()
-                .map(WithdrawRequestDto::fromEntity)
-                .collect(Collectors.toList()));
-    }
-
-    @GetMapping("/all-history")
-    public ResponseEntity<?> getAllHistory(Authentication auth) {
-        return getAllWithdraws(auth);
-    }
-
-    @GetMapping("/pending")
-    public ResponseEntity<?> getPending(Authentication auth) {
-        User adminUser = userService.findByGameId(auth.getName()).orElse(null);
-        if (!isAdmin(adminUser)) return ResponseEntity.status(403).body(Map.of("error", "Forbidden"));
-
-        List<WithdrawRequest> list = withdrawService.getPending();
-        return ResponseEntity.ok(list.stream()
-                .map(WithdrawRequestDto::fromEntity)
-                .collect(Collectors.toList()));
-    }
-
-    @PostMapping("/approve/{withdrawId}")
-    public ResponseEntity<?> approveWithdraw(@PathVariable Long withdrawId,
-                                             @RequestBody(required = false) Map<String, Object> req,
-                                             Authentication auth) {
-        User adminUser = userService.findByGameId(auth.getName()).orElse(null);
-        if (!isAdmin(adminUser)) return ResponseEntity.status(403).body("Forbidden");
-
-        String txnId = (req != null && req.get("transactionId") != null
-                && !req.get("transactionId").toString().trim().isEmpty())
-                ? req.get("transactionId").toString().trim()
-                : null;
-
-        try {
-            WithdrawRequest approved = withdrawService.approve(withdrawId, txnId);
-
-            notificationService.sendNotification(
-                    approved.getUser().getId(),
-                    "Withdrawal Approved",
-                    "Your withdrawal of " + approved.getAmount() + " has been approved."
-            );
-
-            notificationService.sendWebSocketNotification(
-                    approved.getUser().getId(),
-                    "withdraw_update",
-                    WithdrawRequestDto.fromEntity(approved)
-            );
-
-            return ResponseEntity.ok(WithdrawRequestDto.fromEntity(approved));
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
+    private void afterCommit(Runnable r) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void afterCommit() { r.run(); }
+            });
+        } else {
+            r.run();
         }
-    }
-
-    @PostMapping("/reject/{withdrawId}")
-    public ResponseEntity<?> rejectWithdraw(@PathVariable Long withdrawId,
-                                            @RequestBody(required = false) Map<String, Object> req,
-                                            Authentication auth) {
-        User adminUser = userService.findByGameId(auth.getName()).orElse(null);
-        if (!isAdmin(adminUser)) return ResponseEntity.status(403).body("Forbidden");
-
-        String txnId = (req != null && req.get("transactionId") != null)
-                ? req.get("transactionId").toString().trim()
-                : "";
-
-        try {
-            // ব্যালেন্স ফেরত সার্ভিসের ভেতরেই হয়
-            WithdrawRequest rejected = withdrawService.reject(withdrawId, txnId);
-
-            notificationService.sendNotification(
-                    rejected.getUser().getId(),
-                    "Withdrawal Rejected",
-                    "Your withdrawal request of " + rejected.getAmount() + " was rejected."
-            );
-
-            notificationService.sendWebSocketNotification(
-                    rejected.getUser().getId(),
-                    "withdraw_update",
-                    WithdrawRequestDto.fromEntity(rejected)
-            );
-
-            return ResponseEntity.ok(WithdrawRequestDto.fromEntity(rejected));
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
-    }
-
-    /** ================== USER ENDPOINTS ================== **/
-
-    @PostMapping("/request")
-    public ResponseEntity<?> requestWithdraw(@RequestBody Map<String, Object> requestData,
-                                             Authentication auth) {
-        User user = userService.findByGameId(auth.getName()).orElse(null);
-        if (user == null) return ResponseEntity.status(401).body("Unauthorized");
-
-        Object a = requestData.get("amount");
-        Object m = requestData.get("method");
-        Object r = requestData.get("receiverNumber");
-        Object p = requestData.get("password");
-        if (a == null || m == null || r == null) {
-            return ResponseEntity.badRequest().body("amount, method ও receiverNumber দিন");
-        }
-        if (p == null || p.toString().isEmpty()) {
-            return ResponseEntity.badRequest().body("আপনার লগইন পাসওয়ার্ড দিন");
-        }
-        String password = p.toString();   // trim করা হয় না, পাসওয়ার্ডে স্পেস থাকতে পারে
-
-        BigDecimal amount;
-        try {
-            amount = new BigDecimal(a.toString().trim()).setScale(2, RoundingMode.DOWN);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body("Invalid amount format");
-        }
-        if (amount.signum() <= 0) {
-            return ResponseEntity.badRequest().body("Amount must be greater than 0");
-        }
-
-        String method = m.toString().trim();
-        String receiver = r.toString().trim();
-
-        if (method.isEmpty() || method.length() > 20) {
-            return ResponseEntity.badRequest().body("Invalid method");
-        }
-        if (!receiver.matches("^\\+?[0-9]{10,15}$")) {
-            return ResponseEntity.badRequest().body("Invalid receiver number");
-        }
-
-        // সস্তা আগাম চেক। আসল চেক সার্ভিসে লকের ভেতরে হয়
-        BigDecimal turnoverLeft = userService.getTurnoverBalance(user.getGameId());
-        if (turnoverLeft.signum() > 0) {
-            return ResponseEntity.badRequest()
-                    .body("উইথড্র করতে আরও " + turnoverLeft.toPlainString() + " টাকার টার্নওভার বাকি");
-        }
-        if (userService.getBalance(user.getGameId()).compareTo(amount) < 0) {
-            return ResponseEntity.badRequest().body("ব্যালেন্স অপর্যাপ্ত");
-        }
-
-        // লগইন পাসওয়ার্ড যাচাই (সাবমিটের একমাত্র নিরাপত্তা ধাপ)
-        long lockMinutes = passwordLockMinutesLeft(user.getGameId());
-        if (lockMinutes > 0) {
-            return ResponseEntity.status(429)
-                    .body("অনেকবার ভুল পাসওয়ার্ড দিয়েছেন। " + lockMinutes + " মিনিট পরে চেষ্টা করুন");
-        }
-        if (!passwordEncoder.matches(password, user.getPassword())) {
-            recordWrongPassword(user.getGameId());
-            return ResponseEntity.badRequest().body("পাসওয়ার্ড ভুল");
-        }
-        passwordAttempts.remove(user.getGameId());
-
-        try {
-            // লক + টার্নওভার চেক + ব্যালেন্স কাটা + রিকোয়েস্ট তৈরি + টেলিগ্রাম, সবই সার্ভিসে
-            WithdrawRequest created =
-                    withdrawService.requestWithdraw(user.getGameId(), amount, method, receiver);
-
-            notificationService.sendWebSocketNotification(
-                    user.getId(),
-                    "withdraw_update",
-                    WithdrawRequestDto.fromEntity(created)
-            );
-
-            return ResponseEntity.ok(WithdrawRequestDto.fromEntity(created));
-        } catch (IllegalStateException | IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
-    }
-
-    @GetMapping("/history")
-    public ResponseEntity<List<WithdrawRequestDto>> getMyWithdraws(Authentication auth) {
-        User user = userService.findByGameId(auth.getName()).orElse(null);
-        if (user == null) return ResponseEntity.status(401).build();
-
-        List<WithdrawRequest> list = withdrawService.getByUser(user);
-        return ResponseEntity.ok(list.stream()
-                .map(WithdrawRequestDto::fromEntity)
-                .collect(Collectors.toList()));
-    }
-
-    @GetMapping("/lifetime")
-    public ResponseEntity<?> getLifetimeWithdrawTotal(Authentication auth) {
-        User user = userService.findByGameId(auth.getName()).orElse(null);
-        if (user == null) return ResponseEntity.status(401).build();
-
-        BigDecimal total = withdrawService.getTotalWithdrawn(user);
-        Map<String, Object> response = new HashMap<>();
-        response.put("total", total);
-        return ResponseEntity.ok(response);
     }
 }
