@@ -45,7 +45,6 @@ public class DepositController {
 
     // ---------------- ইউজার ----------------
 
-    /** কোন কোন মেথডে এখন active নম্বর আছে */
     @GetMapping("/options")
     public List<String> options() {
         return rotation.listAll().stream()
@@ -77,6 +76,7 @@ public class DepositController {
         return DepositRequestDto.fromEntity(depositService.cancel(id, currentUser(auth)));
     }
 
+    /** ইউজার শুধু নিজের হিস্ট্রি দেখে */
     @GetMapping("/my-history")
     public List<DepositRequestDto> myHistory(Authentication auth) {
         return depositService.myDeposits(currentUser(auth)).stream().map(DepositRequestDto::fromEntity).toList();
@@ -84,12 +84,23 @@ public class DepositController {
 
     // ---------------- অ্যাডমিন + সাপোর্ট(STAFF) ----------------
 
+    /** সবার হিস্ট্রি */
     @GetMapping("/admin")
     @PreAuthorize("hasAnyRole('ADMIN','STAFF')")
     public Page<DepositRequestDto> adminList(@RequestParam(required = false) DepositRequest.Status status,
                                              @RequestParam(defaultValue = "0") int page,
                                              @RequestParam(defaultValue = "50") int size) {
         return depositService.list(status, page, size).map(DepositRequestDto::fromEntity);
+    }
+
+    /** সার্চ: GET /api/deposit/admin/search?q=DEP1234567&status=PENDING */
+    @GetMapping("/admin/search")
+    @PreAuthorize("hasAnyRole('ADMIN','STAFF')")
+    public Page<DepositRequestDto> adminSearch(@RequestParam(defaultValue = "") String q,
+                                               @RequestParam(required = false) DepositRequest.Status status,
+                                               @RequestParam(defaultValue = "0") int page,
+                                               @RequestParam(defaultValue = "50") int size) {
+        return depositService.search(q, status, page, size).map(DepositRequestDto::fromEntity);
     }
 
     @PostMapping("/admin/{id}/approve")
