@@ -5,6 +5,7 @@ import com.yourcompany.ludo.model.GameSession;
 import com.yourcompany.ludo.model.User;
 import com.yourcompany.ludo.repository.GameSessionRepository;
 import com.yourcompany.ludo.service.MatchService;
+import com.yourcompany.ludo.service.TelegramService;
 import com.yourcompany.ludo.service.UserService;
 import com.yourcompany.ludo.util.JwtUtil;
 import org.slf4j.Logger;
@@ -29,17 +30,20 @@ public class MatchController {
     private final JwtUtil jwtUtil;
     private final SimpMessagingTemplate messagingTemplate;
     private final GameSessionRepository gameSessionRepository;
+    private final TelegramService telegram;
 
     public MatchController(MatchService matchService,
                            UserService userService,
                            JwtUtil jwtUtil,
                            SimpMessagingTemplate messagingTemplate,
-                           GameSessionRepository gameSessionRepository) {
+                           GameSessionRepository gameSessionRepository,
+                           TelegramService telegram) {
         this.matchService = matchService;
         this.userService = userService;
         this.jwtUtil = jwtUtil;
         this.messagingTemplate = messagingTemplate;
         this.gameSessionRepository = gameSessionRepository;
+        this.telegram = telegram;
     }
 
     // ---------------------------------------------------------------
@@ -57,6 +61,11 @@ public class MatchController {
             GameSession session = matchService.tryMatch(user, entryFee);
 
             if (session == null) {
+                // কেউ অপেক্ষায় ঢুকেছে (ম্যাচ সেভ হয়ে গেছে, এরপর নোটিফাই)
+                notifyTelegram("⏳ প্লেয়ার ওয়েটিং\n"
+                        + "User: " + gameId + "\n"
+                        + "Amount: " + entryFee.stripTrailingZeros().toPlainString() + " টাকা\n"
+                        + "Status: WAITING");
                 return ResponseEntity.ok(Map.of("status", "WAITING"));
             }
 
@@ -66,6 +75,14 @@ public class MatchController {
             messagingTemplate.convertAndSend("/topic/user/" + session.getPlayer2().getGameId(), payload);
             // আগের ক্লায়েন্টের সাথে সামঞ্জস্য
             messagingTemplate.convertAndSend("/topic/match/session/" + session.getId(), payload);
+
+            notifyTelegram("✅ ম্যাচ হয়েছে\n"
+                    + "Session: " + session.getId() + "\n"
+                    + "Player 1: " + session.getPlayer1().getGameId() + "\n"
+                    + "Player 2: " + session.getPlayer2().getGameId() + "\n"
+                    + "Entry Fee: " + session.getEntryFee() + " টাকা\n"
+                    + "Total Pot: " + session.getTotalPot() + " টাকা\n"
+                    + "Status: " + session.getStatus());
 
             return ResponseEntity.ok(payload);
 
@@ -87,6 +104,11 @@ public class MatchController {
             User user = userService.findByGameId(gameId)
                     .orElseThrow(() -> new IllegalArgumentException("ব্যবহারকারী পাওয়া যায়নি।"));
             matchService.cancelWaiting(user);
+
+            notifyTelegram("🚫 অপেক্ষা বাতিল\n"
+                    + "User: " + gameId + "\n"
+                    + "Status: CANCELLED");
+
             return ResponseEntity.ok(Map.of("status", "CANCELLED"));
         } catch (SecurityException e) {
             return ResponseEntity.status(401).body(Map.of("error", "অথরাইজেশন হেডার নেই"));
@@ -161,6 +183,16 @@ public class MatchController {
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
+
+    /** টেলিগ্রাম যাক বা না যাক, ম্যাচের কাজে কোনো প্রভাব পড়বে না */
+    private void notifyTelegram(String text) {
+        try {
+            telegram.send(text);
+        } catch (Exception e) {
+            log.warn("Telegram notify failed: {}", e.getMessage());
+        }
+    }
+
     private String gameIdFrom(String authHeader) {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             throw new SecurityException("Missing Authorization header");
