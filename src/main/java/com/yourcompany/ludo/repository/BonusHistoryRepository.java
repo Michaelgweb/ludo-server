@@ -16,6 +16,9 @@ public interface BonusHistoryRepository extends JpaRepository<BonusHistory, Long
     // ইউজারের বোনাস টাইপ ফিল্টার করে
     List<BonusHistory> findByUserGameIdAndTypeInOrderByCreatedAtDesc(String userGameId, List<String> types);
 
+    // ইউজারের নির্দিষ্ট টাইপ (সব স্ট্যাটাস) — রেফারেল লিস্টের জন্য
+    List<BonusHistory> findByUserGameIdAndTypeOrderByCreatedAtDesc(String userGameId, String type);
+
     // ইউজারের নির্দিষ্ট টাইপ + স্ট্যাটাস বোনাস
     List<BonusHistory> findByUserGameIdAndTypeAndStatusOrderByCreatedAtDesc(
             String userGameId,
@@ -23,7 +26,7 @@ public interface BonusHistoryRepository extends JpaRepository<BonusHistory, Long
             String status
     );
 
-    // নতুন ইউজারের সোর্স হিসেবে বোনাস (যাতে referrer খুঁজে পাওয়া যায়)
+    // নতুন ইউজারের সোর্স হিসেবে বোনাস (যাতে referrer খুঁজে পাওয়া যায়)
     List<BonusHistory> findBySourceGameIdOrderByCreatedAtDesc(String sourceGameId);
 
     // সোর্স হিসেবে বোনাস + টাইপ + স্ট্যাটাস
@@ -46,4 +49,7 @@ public interface BonusHistoryRepository extends JpaRepository<BonusHistory, Long
 
     // একাধিক টাইপের জন্য ফিল্টার
     List<BonusHistory> findByTypeInOrderByCreatedAtDesc(List<String> types);
+
+    // একটি টাইপের সব রেকর্ড (সব ইউজার) — অ্যাডমিন রেফারেল লিস্টের জন্য
+    List<BonusHistory> findByTypeOrderByCreatedAtDesc(String type);
 }
