@@ -1,6 +1,8 @@
 package com.yourcompany.ludo.service;
 
 import com.yourcompany.ludo.repository.GameSessionRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
@@ -12,6 +14,8 @@ import java.security.SecureRandom;
 @Service
 public class GameFlowService {
 
+    private static final Logger log = LoggerFactory.getLogger(GameFlowService.class);
+
     public static final long TURN_MS = 15_000;
     public static final int MAX_MISSES = 3;
     /** ফি কাটার পর অপর জন এর মধ্যে প্রথম রোল না করলে বাতিল + রিফান্ড */
@@ -20,13 +24,15 @@ public class GameFlowService {
     private final GameStateStore store;
     private final GameLock lock;
     private final GameMoneyService money;
+    private final TelegramService telegram;
     private final SecureRandom rnd = new SecureRandom();
 
     public GameFlowService(GameStateStore store, GameLock lock, GameMoneyService money,
-                           GameSessionRepository unused) {
+                           GameSessionRepository unused, TelegramService telegram) {
         this.store = store;
         this.lock = lock;
         this.money = money;
+        this.telegram = telegram;
     }
 
     public record RollResult(int dice, boolean cancelled, String message,
@@ -36,6 +42,15 @@ public class GameFlowService {
 
     public record Expired(Kind kind, int actor, String gameId, int token, RollResult roll) {
         static Expired none() { return new Expired(Kind.NONE, 0, null, -1, null); }
+    }
+
+    /** টেলিগ্রাম যাক বা না যাক, গেমের কাজে কোনো প্রভাব পড়বে না */
+    private void notifyTelegram(String text) {
+        try {
+            telegram.send(text);
+        } catch (Exception e) {
+            log.warn("Telegram notify failed: {}", e.getMessage());
+        }
     }
 
     // =====================================================================
@@ -51,6 +66,12 @@ public class GameFlowService {
             s.g2 = ids[1];
             s.deadline = System.currentTimeMillis() + TURN_MS;
             store.save(s);
+
+            notifyTelegram("▶️ ম্যাচ শুরু\n"
+                    + "Session: " + sid + "\n"
+                    + "Player 1: " + s.g1 + "\n"
+                    + "Player 2: " + s.g2 + "\n"
+                    + "Status: ONGOING");
             return null;
         });
     }
@@ -77,10 +98,22 @@ public class GameFlowService {
         if (!s.feeDeducted) {
             if (!money.chargeEntryFee(s.id)) {              // DB: ব্যালেন্স কম, বাতিল হয়েছে
                 store.delete(s.id);
+                notifyTelegram("❌ ম্যাচ বাতিল\n"
+                        + "Session: " + s.id + "\n"
+                        + "Player 1: " + s.g1 + "\n"
+                        + "Player 2: " + s.g2 + "\n"
+                        + "কারণ: ব্যালেন্স অপর্যাপ্ত\n"
+                        + "Status: CANCELLED");
                 return new RollResult(0, true, "Insufficient balance", me, s.currentPlayer, false);
             }
             s.feeDeducted = true;
             s.firstRollAt = System.currentTimeMillis();
+
+            notifyTelegram("💰 এন্ট্রি ফি কাটা হয়েছে\n"
+                    + "Session: " + s.id + "\n"
+                    + "Player 1: " + s.g1 + "\n"
+                    + "Player 2: " + s.g2 + "\n"
+                    + "Status: ONGOING");
         }
 
         int[] mine = s.tokens(me);
@@ -131,6 +164,12 @@ public class GameFlowService {
                 if (s.feeDeducted && now - s.firstRollAt > FIRST_ROLL_TIMEOUT_MS) {
                     money.refundAndCancel(sid, "প্রতিপক্ষ রোল না করায় ম্যাচ বাতিল, ফি ফেরত");
                     store.delete(sid);
+                    notifyTelegram("🔄 ম্যাচ বাতিল (ফি ফেরত)\n"
+                            + "Session: " + sid + "\n"
+                            + "Player 1: " + s.g1 + "\n"
+                            + "Player 2: " + s.g2 + "\n"
+                            + "কারণ: প্রতিপক্ষ রোল করেনি\n"
+                            + "Status: CANCELLED");
                     return Expired.none();
                 }
                 s.deadline = now + TURN_MS;
@@ -175,7 +214,12 @@ public class GameFlowService {
             GameState s = store.load(sid);
             if (s == null) {
                 // গেম এখনো শুরু হয়নি (MATCH_FOUND) বা শেষ। ফি না কাটা থাকলে শুধু বাতিল
-                money.cancelIfIdle(sid, gameId, "ম্যাচ বাতিল");
+                if (money.cancelIfIdle(sid, gameId, "ম্যাচ বাতিল")) {
+                    notifyTelegram("🚫 ম্যাচ বাতিল (শুরুর আগে)\n"
+                            + "Session: " + sid + "\n"
+                            + "User: " + gameId + " বের হয়েছে\n"
+                            + "Status: CANCELLED");
+                }
                 return null;
             }
             quit(s, s.slotOf(gameId), "প্রতিপক্ষ বের হয়ে গেছে");
@@ -185,12 +229,29 @@ public class GameFlowService {
 
     /** leaver হারে। কেউ রোল না করলে বাতিল, একজন করলে রিফান্ড, দুজন করলে প্রতিপক্ষ জেতে */
     private void quit(GameState s, int leaver, String loseMsg) {
+        String leaverId = leaver == 1 ? s.g1 : s.g2;
+        String otherId = leaver == 1 ? s.g2 : s.g1;
+
         if (!s.feeDeducted) {
             money.refundAndCancel(s.id, "ম্যাচ বাতিল");
+            notifyTelegram("🚫 ম্যাচ বাতিল\n"
+                    + "Session: " + s.id + "\n"
+                    + "বের হয়েছে: " + leaverId + "\n"
+                    + "Status: CANCELLED");
         } else if (!s.bothRolled()) {
             money.refundAndCancel(s.id, "ম্যাচ বাতিল, ফি ফেরত দেওয়া হয়েছে");
+            notifyTelegram("🔄 ম্যাচ বাতিল (ফি ফেরত)\n"
+                    + "Session: " + s.id + "\n"
+                    + "বের হয়েছে: " + leaverId + "\n"
+                    + "Status: CANCELLED");
         } else {
             money.payout(s.id, leaver == 1 ? 2 : 1, loseMsg);
+            notifyTelegram("🏆 ম্যাচ শেষ\n"
+                    + "Session: " + s.id + "\n"
+                    + "বিজয়ী: " + otherId + "\n"
+                    + "পরাজিত: " + leaverId + "\n"
+                    + "কারণ: " + loseMsg + "\n"
+                    + "Status: FINISHED");
         }
         store.delete(s.id);
     }
@@ -202,6 +263,10 @@ public class GameFlowService {
         lock.with(sid, () -> {
             if (money.cancelIfIdle(sid, null, "কেউ খেলা শুরু না করায় ম্যাচ বাতিল")) {
                 store.delete(sid);
+                notifyTelegram("⌛ ম্যাচ বাতিল\n"
+                        + "Session: " + sid + "\n"
+                        + "কারণ: কেউ খেলা শুরু করেনি\n"
+                        + "Status: CANCELLED");
             }
             return null;
         });
