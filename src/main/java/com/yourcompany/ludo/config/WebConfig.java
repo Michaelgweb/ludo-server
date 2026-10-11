@@ -19,31 +19,30 @@ public class WebConfig implements WebMvcConfigurer {
     @Value("${file.upload-url-path:/avatars}")
     private String uploadUrlPath;
 
+    @Value("${app.apk.dir:apk}")
+    private String apkDir;
+
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
-        // রিলেটিভ পাথ (যেমন "avatars") কে পুরো পাথে রূপান্তর, UserController এও একই নিয়ম
-        Path dir = Paths.get(uploadDir).toAbsolutePath().normalize();
+
+        // ---------- অ্যাভাটার ----------
+        Path avatarDir = prepareDir(uploadDir);
+        registry.addResourceHandler(uploadUrlPath + "/**")
+                .addResourceLocations(avatarDir.toUri().toString());
+
+        // ---------- APK ----------
+        Path apkPath = prepareDir(apkDir);
+        registry.addResourceHandler("/apk/**")
+                .addResourceLocations(apkPath.toUri().toString());
+    }
+
+    private Path prepareDir(String dirName) {
+        Path dir = Paths.get(dirName).toAbsolutePath().normalize();
         try {
             Files.createDirectories(dir);
         } catch (IOException e) {
-            throw new IllegalStateException("Cannot create upload dir: " + dir, e);
+            throw new IllegalStateException("Cannot create dir: " + dir, e);
         }
-
-        // /avatars/** ইউআরএল আসলে এই ফোল্ডার থেকে ফাইল সার্ভ করবে
-        // dir.toUri() এর শেষে নিজে থেকেই "/" থাকে (ফোল্ডার আগে তৈরি করা হয়েছে)
-        registry.addResourceHandler(uploadUrlPath + "/**")
-                .addResourceLocations(dir.toUri().toString());
-    }
-}
-
-
-@Configuration
-public class WebConfig implements WebMvcConfigurer {
-    @Value("${app.apk.dir:apk}") private String apkDir;
-
-    @Override
-    public void addResourceHandlers(ResourceHandlerRegistry r) {
-        r.addResourceHandler("/apk/**")
-         .addResourceLocations("file:" + apkDir + "/");
+        return dir;
     }
 }
