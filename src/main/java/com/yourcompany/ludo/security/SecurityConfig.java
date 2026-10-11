@@ -100,8 +100,8 @@ public class SecurityConfig {
 
                 // ===== Admin only (public তালিকার আগে থাকতে হবে) =====
                 .requestMatchers(
+                    "/api/admin/**",                 // APK আপলোড + অন্যান্য অ্যাডমিন API
                     "/api/payment-config/admin/**",
-                    "/api/admin/payment-accounts/**",
                     "/api/payment-sms/**",
                     "/api/withdraw/approve/**",
                     "/api/withdraw/reject/**",
@@ -118,6 +118,8 @@ public class SecurityConfig {
                     "/error",
                     "/auth/**",
                     "/api/otp/**",
+                    "/api/version",                  // অ্যাপ আপডেট চেক
+                    "/apk/**",                       // APK ডাউনলোড
                     "/avatars/**",
                     "/api/payment-config/**",
                     "/api/payment/**",
@@ -133,7 +135,6 @@ public class SecurityConfig {
                 // ===== Authenticated =====
                 .requestMatchers("/api/user/profile/**").authenticated()
                 .requestMatchers("/api/deposit/**").authenticated()
-                // গেম: রোল, চাল, স্টেট, লিভ ও চ্যাট (/api/game/chat/**) সবই লগইন লাগবে
                 .requestMatchers("/api/game/**").authenticated()
 
                 // বাকি সব লগইন লাগবে
