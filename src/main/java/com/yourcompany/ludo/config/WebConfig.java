@@ -35,3 +35,15 @@ public class WebConfig implements WebMvcConfigurer {
                 .addResourceLocations(dir.toUri().toString());
     }
 }
+
+
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+    @Value("${app.apk.dir:apk}") private String apkDir;
+
+    @Override
+    public void addResourceHandlers(ResourceHandlerRegistry r) {
+        r.addResourceHandler("/apk/**")
+         .addResourceLocations("file:" + apkDir + "/");
+    }
+}
